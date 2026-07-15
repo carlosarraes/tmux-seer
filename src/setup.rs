@@ -540,7 +540,8 @@ fn detect_local() -> Vec<SetupItem> {
 fn probe_remote(host: &str) -> Result<Vec<SetupItem>> {
     validate_host(host)?;
     let ssh = env::var_os("TMUX_SEER_SSH").unwrap_or_else(|| "ssh".into());
-    let script = r#"for agent in claude codex pi; do
+    let script = r#"exec "$SHELL" -lic '
+for agent in claude codex pi; do
   available=0; configured=0
   command -v "$agent" >/dev/null 2>&1 && available=1
   case "$agent" in
@@ -549,8 +550,9 @@ fn probe_remote(host: &str) -> Result<Vec<SetupItem>> {
     pi) file="$HOME/.pi/agent/extensions/tmux-seer.ts" ;;
   esac
   test -f "$file" && grep -q "tmux-seer\|Managed by tmux-seer" "$file" && configured=1
-  printf '%s|%s|%s\n' "$agent" "$available" "$configured"
-done"#;
+  printf "%s|%s|%s\n" "$agent" "$available" "$configured"
+done
+'"#;
     let output = Command::new(ssh)
         .args([
             "-o",
@@ -971,4 +973,75 @@ fn unique_backup(path: &Path) -> Result<PathBuf> {
         }
     }
     bail!("could not allocate backup name for {}", path.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn remote_probe_finds_agent_added_by_login_and_interactive_shell_startup() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("home");
+        let fnm_bin = home.join("fnm/bin");
+        fs::create_dir_all(&fnm_bin).unwrap();
+        fs::write(
+            home.join(".login-env"),
+            "export FNM_BIN=\"$HOME/fnm/bin\"\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".interactive-env"),
+            "export PATH=\"$FNM_BIN:$PATH\"\n",
+        )
+        .unwrap();
+
+        let pi = fnm_bin.join("pi");
+        fs::write(&pi, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&pi, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let login_shell = directory.path().join("login-shell");
+        fs::write(
+            &login_shell,
+            r#"#!/bin/sh
+test "$1" = "-lic" || exit 64
+. "$HOME/.login-env"
+. "$HOME/.interactive-env"
+exec /bin/sh -c "$2"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&login_shell, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ssh = directory.path().join("ssh");
+        fs::write(
+            &ssh,
+            r#"#!/bin/sh
+for argument do remote_command="$argument"; done
+HOME="$TMUX_SEER_TEST_HOME" SHELL="$TMUX_SEER_TEST_SHELL" PATH=/tmux-seer-no-agents \
+  /bin/sh -c "$remote_command"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let items = temp_env::with_vars(
+            [
+                ("TMUX_SEER_SSH", Some(ssh.as_os_str())),
+                ("TMUX_SEER_TEST_HOME", Some(home.as_os_str())),
+                ("TMUX_SEER_TEST_SHELL", Some(login_shell.as_os_str())),
+            ],
+            || probe_remote("remote").unwrap(),
+        );
+
+        let pi = items
+            .iter()
+            .find(|item| item.integration == Integration::Pi)
+            .unwrap();
+        assert!(pi.available);
+    }
 }
