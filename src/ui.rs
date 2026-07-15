@@ -114,6 +114,18 @@ impl Dashboard {
                 _ => "↑↓/jk move · Tab fold · / filter · offline · q close",
             };
         }
+        if is_remote_target(row.target.as_ref()) {
+            return match row.kind {
+                RowKind::Host => "↑↓/jk · Tab fold · / filter · Enter connect · Prefix+d return",
+                RowKind::Session => {
+                    "↑↓/jk · Tab fold · / filter · Enter attach · r rename · Prefix+d return"
+                }
+                RowKind::Window => "↑↓/jk · Tab fold · / filter · Enter attach · Prefix+d return",
+                RowKind::Agent => {
+                    "↑↓/jk · Tab fold session · / filter · Enter attach · Prefix+d return"
+                }
+            };
+        }
         match row.kind {
             RowKind::Host if row.target.is_some() => {
                 "↑↓/jk move · Tab fold · / filter · Enter connect · q close"
@@ -357,6 +369,16 @@ impl Dashboard {
         } else {
             self.selected.min(self.rows.len().saturating_sub(1))
         };
+    }
+}
+
+fn is_remote_target(target: Option<&NavigationTarget>) -> bool {
+    match target {
+        Some(NavigationTarget::Host { .. }) => true,
+        Some(NavigationTarget::Session { host, .. })
+        | Some(NavigationTarget::Window { host, .. }) => host != "local",
+        Some(NavigationTarget::Agent(key)) => key.host != "local",
+        None => false,
     }
 }
 

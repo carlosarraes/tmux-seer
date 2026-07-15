@@ -42,23 +42,13 @@ pub fn bootstrap(tmux: Tmux, binary: &str) -> Result<()> {
         .show_global_option("@seer_popup_height")
         .unwrap_or_else(|| "70%".into());
     let popup_command = format!("{} popup --client '#{{client_tty}}'", shell_quote(binary));
-    tmux.output([
-        "bind-key",
-        &key,
-        "display-popup",
-        "-EE",
-        "-T",
-        "Seer",
-        "-x",
-        "R",
-        "-y",
-        "0",
-        "-w",
-        &width,
-        "-h",
-        &height,
-        &popup_command,
-    ])?;
+    let display_command = format!(
+        "display-popup -EE -T Seer -x R -y 0 -w {} -h {} {}",
+        tmux_quote(&width),
+        tmux_quote(&height),
+        tmux_quote(&popup_command),
+    );
+    tmux.output(["bind-key", &key, "run-shell", "-C", &display_command])?;
     tmux.output([
         "run-shell",
         "-b",
@@ -77,4 +67,8 @@ fn ensure_option(tmux: &Tmux, name: &str, default: &str) -> Result<()> {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn tmux_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }

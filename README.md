@@ -114,7 +114,7 @@ Hosts are never scanned automatically. Seer uses only aliases in `@seer_hosts`, 
 
 Each remote host needs `~/.local/bin/tmux-seer`. Setup and the standalone installer use the matching release artifact.
 
-Selecting any remote host, session, window, or agent reuses the Seer popup for an interactive remote tmux attachment. Press `Escape` to close only the popup and SSH client; the remote tmux session and its agents continue running.
+Selecting any remote host, session, window, or agent reuses the Seer popup for an interactive remote tmux attachment. Press your tmux prefix followed by `d` to detach and return; the remote tmux session and its agents continue running.
 
 ## Uninstalling agent hooks
 

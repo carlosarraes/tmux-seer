@@ -148,23 +148,44 @@ fn hierarchy_rows_expose_typed_navigation_targets() {
 }
 
 #[test]
-fn shortcut_hint_matches_the_highlighted_row_actions() {
+fn remote_shortcut_hints_explain_how_to_return() {
     let mut dashboard = dashboard_with(&[AgentState::Working]);
+    assert_eq!(
+        dashboard.shortcut_hint(),
+        "↑↓/jk · Tab fold session · / filter · Enter attach · Prefix+d return"
+    );
+
+    dashboard.move_selection(-1);
+    assert_eq!(
+        dashboard.shortcut_hint(),
+        "↑↓/jk · Tab fold · / filter · Enter attach · r rename · Prefix+d return"
+    );
+
+    dashboard.move_selection(-1);
+    assert_eq!(
+        dashboard.shortcut_hint(),
+        "↑↓/jk · Tab fold · / filter · Enter connect · Prefix+d return"
+    );
+}
+
+#[test]
+fn local_shortcut_hints_keep_jump_wording() {
+    let mut host = HostSnapshot::empty("local", 1);
+    host.push_test_agent(AgentState::Working);
+    let mut dashboard = Dashboard::new(AggregateSnapshot {
+        schema_version: SCHEMA_VERSION,
+        generated_at_ms: 10,
+        hosts: vec![host],
+    });
+
     assert_eq!(
         dashboard.shortcut_hint(),
         "↑↓/jk move · Tab fold session · / filter · Enter jump pane · q close"
     );
-
     dashboard.move_selection(-1);
     assert_eq!(
         dashboard.shortcut_hint(),
         "↑↓/jk move · Tab fold · / filter · Enter jump session · r rename · q close"
-    );
-
-    dashboard.move_selection(-1);
-    assert_eq!(
-        dashboard.shortcut_hint(),
-        "↑↓/jk move · Tab fold · / filter · Enter connect · q close"
     );
 }
 
