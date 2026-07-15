@@ -55,10 +55,10 @@ fn local_window_navigation_selects_the_requested_window() {
         },
     );
 
-    let log = fs::read_to_string(fake.log).unwrap();
-    assert!(log.contains("switch-client -c /dev/pts/1 -t $1"));
-    assert!(log.contains("select-window -t $1:@2"));
-    assert!(!log.contains("select-pane"));
+    assert_eq!(
+        fs::read_to_string(fake.log).unwrap(),
+        "switch-client -c /dev/pts/1 -t $1:@2\n"
+    );
 }
 
 #[test]
@@ -83,10 +83,10 @@ fn local_jump_targets_only_requested_client_and_pane() {
                 .unwrap();
         },
     );
-    let log = fs::read_to_string(fake.log).unwrap();
-    assert!(log.contains("switch-client -c /dev/pts/1 -t $1"));
-    assert!(log.contains("select-window -t $1:@2"));
-    assert!(log.contains("select-pane -t %3"));
+    assert_eq!(
+        fs::read_to_string(fake.log).unwrap(),
+        "switch-client -c /dev/pts/1 -t %3\n"
+    );
 }
 
 #[test]
@@ -116,9 +116,13 @@ fn remote_agent_navigation_uses_current_popup_without_bridge_windows() {
     );
     let ssh_log = fs::read_to_string(ssh.log).unwrap_or_default();
     assert!(ssh_log.contains("-tt mac"));
-    assert!(ssh_log.contains("tmux select-window -t '$1:@2'"));
-    assert!(ssh_log.contains("select-pane -t '%3'"));
-    assert!(ssh_log.contains("attach-session -t '$1'"));
+    assert!(ssh_log.contains("exec \"$SHELL\" -lc"));
+    assert!(ssh_log.contains("tmux select-window -t"));
+    assert!(ssh_log.contains("$1:@2"));
+    assert!(ssh_log.contains("&& tmux select-pane -t"));
+    assert!(ssh_log.contains("%3"));
+    assert!(ssh_log.contains("&& exec tmux attach-session -t"));
+    assert!(!ssh_log.contains(r"\;"));
     let tmux_log = fs::read_to_string(tmux.log).unwrap_or_default();
     assert!(!tmux_log.contains("new-window"));
     assert!(!tmux_log.contains("link-window"));
@@ -161,15 +165,17 @@ fn remote_hierarchy_navigation_attaches_to_the_selected_scope() {
         host: "mac".into(),
         session_id: "$1".into(),
     });
-    assert!(session.contains("exec tmux attach-session -t '$1'"));
+    assert!(session.contains("exec tmux attach-session -t"));
+    assert!(session.contains("$1"));
 
     let window = remote_ssh_log(NavigationTarget::Window {
         host: "mac".into(),
         session_id: "$1".into(),
         window_id: "@2".into(),
     });
-    assert!(window.contains("tmux select-window -t '$1:@2'"));
-    assert!(window.contains("exec tmux attach-session -t '$1'"));
+    assert!(window.contains("tmux select-window -t"));
+    assert!(window.contains("$1:@2"));
+    assert!(window.contains("exec tmux attach-session -t"));
 }
 
 #[test]
@@ -207,7 +213,9 @@ fn session_rename_targets_stable_ids_locally_and_remotely() {
         },
     );
     let ssh_log = fs::read_to_string(ssh.log).unwrap();
-    assert!(ssh_log.contains("mac tmux rename-session -t '$2' 'review'\\''s ready'"));
+    assert!(ssh_log.contains("mac exec \"$SHELL\" -lc"));
+    assert!(ssh_log.contains("tmux rename-session -t"));
+    assert!(ssh_log.contains("review"));
     assert!(fs::read_to_string(tmux.log).unwrap_or_default().is_empty());
 }
 

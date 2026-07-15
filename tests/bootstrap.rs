@@ -26,6 +26,7 @@ fn bootstrap_sets_binding_and_status_without_touching_interval() {
     let log = fs::read_to_string(fake.log).unwrap();
     assert!(log.contains("set-option -g status-right #[fg=red]theme #{@seer_widget}"));
     assert!(log.contains("bind-key S display-popup"));
+    assert!(log.contains("display-popup -EE"));
     assert!(log.contains("-x R -y 0"));
     assert!(log.contains("run-shell -b"));
     assert!(!log.contains("status-interval"));

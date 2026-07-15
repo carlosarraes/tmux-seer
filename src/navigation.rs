@@ -1,12 +1,8 @@
-use std::{process::Command, thread, time::Duration};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::{
-    daemon::popup_option_name,
-    snapshot::AgentKey,
-    tmux::{now_ms, Tmux},
-};
+use crate::{popup::PopupLease, snapshot::AgentKey, tmux::Tmux};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavigationTarget {
@@ -48,10 +44,7 @@ impl Navigator {
             } if host == "local" => {
                 validate_tmux_id(session_id, '$', "session")?;
                 validate_tmux_id(window_id, '@', "window")?;
-                self.switch_client(session_id, client)?;
-                self.tmux
-                    .output(["select-window", "-t", &format!("{session_id}:{window_id}")])?;
-                Ok(())
+                self.switch_client(&format!("{session_id}:{window_id}"), client)
             }
             NavigationTarget::Host { host } => self.remote_attach(host, None, None, None, client),
             NavigationTarget::Session { host, session_id } => {
@@ -79,11 +72,11 @@ impl Navigator {
         }
 
         let ssh = std::env::var_os("TMUX_SEER_SSH").unwrap_or_else(|| "ssh".into());
-        let command = format!(
+        let command = remote_login_command(&format!(
             "tmux rename-session -t {} {}",
             shell_quote(session_id),
             shell_quote(name),
-        );
+        ));
         let output = Command::new(ssh)
             .args([
                 "-o",
@@ -112,14 +105,7 @@ impl Navigator {
     }
 
     fn local_jump(&self, key: &AgentKey, client: Option<&str>) -> Result<()> {
-        self.switch_client(&key.session_id, client)?;
-        self.tmux.output([
-            "select-window",
-            "-t",
-            &format!("{}:{}", key.session_id, key.window_id),
-        ])?;
-        self.tmux.output(["select-pane", "-t", &key.pane_id])?;
-        Ok(())
+        self.switch_client(&key.pane_id, client)
     }
 
     fn switch_client(&self, session_id: &str, client: Option<&str>) -> Result<()> {
@@ -170,12 +156,12 @@ impl Navigator {
                 format!("exec tmux attach-session -t {}", shell_quote(session))
             }
             (Some(session), Some(window), None) => format!(
-                "tmux select-window -t {} \\; exec tmux attach-session -t {}",
+                "tmux select-window -t {} && exec tmux attach-session -t {}",
                 shell_quote(&format!("{session}:{window}")),
                 shell_quote(session),
             ),
             (Some(session), Some(window), Some(pane)) => format!(
-                "tmux select-window -t {} \\; select-pane -t {} \\; exec tmux attach-session -t {}",
+                "tmux select-window -t {} && tmux select-pane -t {} && exec tmux attach-session -t {}",
                 shell_quote(&format!("{session}:{window}")),
                 shell_quote(pane),
                 shell_quote(session),
@@ -183,7 +169,8 @@ impl Navigator {
             _ => bail!("incomplete remote tmux target"),
         };
         let ssh = std::env::var_os("TMUX_SEER_SSH").unwrap_or_else(|| "ssh".into());
-        let mut suppression = client.map(|client| PopupSuppression::new(&self.tmux, client));
+        let _suppression = client.map(|client| PopupLease::new(self.tmux.clone(), client));
+        let remote = remote_login_command(&remote);
         let mut child = Command::new(ssh)
             .args([
                 "-o",
@@ -196,46 +183,11 @@ impl Navigator {
             ])
             .spawn()
             .with_context(|| format!("failed to open remote tmux on {host}"))?;
-        let status = loop {
-            if let Some(suppression) = suppression.as_mut() {
-                suppression.heartbeat();
-            }
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            thread::sleep(Duration::from_millis(250));
-        };
+        let status = child.wait()?;
         if !status.success() {
             bail!("remote tmux attachment failed on {host}");
         }
         Ok(())
-    }
-}
-
-struct PopupSuppression<'a> {
-    tmux: &'a Tmux,
-    option: String,
-}
-
-impl<'a> PopupSuppression<'a> {
-    fn new(tmux: &'a Tmux, client: &str) -> Self {
-        let mut suppression = Self {
-            tmux,
-            option: popup_option_name(client),
-        };
-        suppression.heartbeat();
-        suppression
-    }
-
-    fn heartbeat(&mut self) {
-        let expiry = now_ms().saturating_add(2_000).to_string();
-        let _ = self.tmux.set_global_option(&self.option, &expiry);
-    }
-}
-
-impl Drop for PopupSuppression<'_> {
-    fn drop(&mut self) {
-        let _ = self.tmux.unset_global_option(&self.option);
     }
 }
 
@@ -270,4 +222,8 @@ fn validate_tmux_id(value: &str, prefix: char, label: &str) -> Result<()> {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn remote_login_command(command: &str) -> String {
+    format!("exec \"$SHELL\" -lc {}", shell_quote(command))
 }

@@ -46,7 +46,7 @@ pub fn bootstrap(tmux: Tmux, binary: &str) -> Result<()> {
         "bind-key",
         &key,
         "display-popup",
-        "-E",
+        "-EE",
         "-T",
         "Seer",
         "-x",

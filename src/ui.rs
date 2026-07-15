@@ -21,11 +21,8 @@ use ratatui::{
 };
 
 use crate::{
-    daemon::{popup_option_name, runtime_snapshot_path},
-    model::AgentState,
-    navigation::NavigationTarget,
-    snapshot::AggregateSnapshot,
-    tmux::{now_ms, Tmux},
+    daemon::runtime_snapshot_path, model::AgentState, navigation::NavigationTarget,
+    popup::PopupLease, snapshot::AggregateSnapshot, tmux::Tmux,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,9 +364,9 @@ pub fn run(client: Option<String>) -> Result<Option<NavigationTarget>> {
     let snapshot = load_snapshot()?;
     let mut dashboard = Dashboard::new(snapshot);
     let tmux = Tmux::new();
-    let mut popup_guard = client.map(|client| PopupGuard::new(tmux.clone(), client));
+    let _popup_lease = client.map(|client| PopupLease::new(tmux.clone(), &client));
     let mut terminal = open_terminal()?;
-    let result = dashboard_loop(&mut terminal, &mut dashboard, &mut popup_guard, &tmux);
+    let result = dashboard_loop(&mut terminal, &mut dashboard, &tmux);
     let cleanup = close_terminal(&mut terminal);
     match (result, cleanup) {
         (Err(error), _) => Err(error),
@@ -381,7 +378,6 @@ pub fn run(client: Option<String>) -> Result<Option<NavigationTarget>> {
 fn dashboard_loop(
     terminal: &mut Tui,
     dashboard: &mut Dashboard,
-    popup_guard: &mut Option<PopupGuard>,
     tmux: &Tmux,
 ) -> Result<Option<NavigationTarget>> {
     let mut filter_mode = false;
@@ -389,104 +385,166 @@ fn dashboard_loop(
     let mut status_message = None;
     let mut last_reload = Instant::now();
 
-    let selected =
-        loop {
-            if let Some(guard) = popup_guard.as_mut() {
-                guard.heartbeat();
+    let selected = loop {
+        terminal.draw(|frame| {
+            render(
+                frame,
+                dashboard,
+                filter_mode,
+                rename_editor.as_ref(),
+                status_message.as_deref(),
+            )
+        })?;
+        if event::poll(Duration::from_millis(200))? {
+            let mut events = vec![event::read()?];
+            while event::poll(Duration::ZERO)? {
+                events.push(event::read()?);
             }
-            terminal.draw(|frame| {
-                render(
-                    frame,
-                    dashboard,
-                    filter_mode,
-                    rename_editor.as_ref(),
-                    status_message.as_deref(),
-                )
-            })?;
-            if event::poll(Duration::from_millis(200))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
-                    status_message = None;
-                    if let Some(editor) = rename_editor.as_mut() {
-                        match key.code {
-                            KeyCode::Esc => rename_editor = None,
-                            KeyCode::Enter if editor.name.trim().is_empty() => {
-                                status_message = Some("Session name cannot be empty".to_owned());
-                            }
-                            KeyCode::Enter => {
-                                match crate::navigation::Navigator::new(tmux.clone())
-                                    .rename_session(&editor.host, &editor.session_id, &editor.name)
-                                {
-                                    Ok(()) => {
-                                        dashboard.update_session_name(
-                                            &editor.host,
-                                            &editor.session_id,
-                                            &editor.name,
-                                        );
-                                        status_message =
-                                            Some(format!("Renamed session to {}", editor.name));
-                                        rename_editor = None;
-                                    }
-                                    Err(error) => status_message = Some(error.to_string()),
-                                }
-                            }
-                            KeyCode::Backspace => editor.backspace(),
-                            KeyCode::Char(character) => editor.push(character),
-                            _ => {}
-                        }
-                        continue;
-                    }
-                    if filter_mode {
-                        match key.code {
-                            KeyCode::Esc | KeyCode::Enter => filter_mode = false,
-                            KeyCode::Backspace => {
-                                let mut filter = dashboard.filter().to_owned();
-                                filter.pop();
-                                dashboard.set_filter(filter);
-                            }
-                            KeyCode::Char(character) => {
-                                let mut filter = dashboard.filter().to_owned();
-                                filter.push(character);
-                                dashboard.set_filter(filter);
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break None,
-                        KeyCode::Up | KeyCode::Char('k') => dashboard.move_selection(-1),
-                        KeyCode::Down | KeyCode::Char('j') => dashboard.move_selection(1),
-                        KeyCode::Tab => dashboard.toggle_selected(),
-                        KeyCode::Char('/') => filter_mode = true,
-                        KeyCode::Char('r') => {
-                            if let Some((host, session_id, name)) = dashboard.selected_session() {
-                                rename_editor = Some(RenameEditor::new(host, session_id, name));
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if let Some(target) =
-                                dashboard.selected().and_then(|row| row.target.clone())
-                            {
-                                break Some(target);
-                            } else {
-                                dashboard.toggle_selected();
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+            if let DashboardAction::Exit(selected) = handle_events(
+                events,
+                dashboard,
+                &mut filter_mode,
+                &mut rename_editor,
+                &mut status_message,
+                tmux,
+            ) {
+                break selected;
             }
-            if last_reload.elapsed() >= Duration::from_millis(500) {
-                if let Ok(snapshot) = load_snapshot() {
-                    dashboard.replace_snapshot(snapshot);
-                }
-                last_reload = Instant::now();
+        }
+        if last_reload.elapsed() >= Duration::from_millis(500) {
+            if let Ok(snapshot) = load_snapshot() {
+                dashboard.replace_snapshot(snapshot);
             }
-        };
+            last_reload = Instant::now();
+        }
+    };
     Ok(selected)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DashboardAction {
+    Continue,
+    Exit(Option<NavigationTarget>),
+}
+
+fn handle_events(
+    events: impl IntoIterator<Item = Event>,
+    dashboard: &mut Dashboard,
+    filter_mode: &mut bool,
+    rename_editor: &mut Option<RenameEditor>,
+    status_message: &mut Option<String>,
+    tmux: &Tmux,
+) -> DashboardAction {
+    for event in events {
+        let Event::Key(key) = event else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        let action = handle_key(
+            key.code,
+            dashboard,
+            filter_mode,
+            rename_editor,
+            status_message,
+            tmux,
+        );
+        if action != DashboardAction::Continue {
+            return action;
+        }
+    }
+    DashboardAction::Continue
+}
+
+fn handle_key(
+    key: KeyCode,
+    dashboard: &mut Dashboard,
+    filter_mode: &mut bool,
+    rename_editor: &mut Option<RenameEditor>,
+    status_message: &mut Option<String>,
+    tmux: &Tmux,
+) -> DashboardAction {
+    *status_message = None;
+    if let Some(editor) = rename_editor.as_mut() {
+        match key {
+            KeyCode::Esc => *rename_editor = None,
+            KeyCode::Enter if editor.name.trim().is_empty() => {
+                *status_message = Some("Session name cannot be empty".to_owned());
+            }
+            KeyCode::Enter => {
+                match crate::navigation::Navigator::new(tmux.clone()).rename_session(
+                    &editor.host,
+                    &editor.session_id,
+                    &editor.name,
+                ) {
+                    Ok(()) => {
+                        dashboard.update_session_name(
+                            &editor.host,
+                            &editor.session_id,
+                            &editor.name,
+                        );
+                        *status_message = Some(format!("Renamed session to {}", editor.name));
+                        *rename_editor = None;
+                    }
+                    Err(error) => *status_message = Some(error.to_string()),
+                }
+            }
+            KeyCode::Backspace => editor.backspace(),
+            KeyCode::Char(character) => editor.push(character),
+            _ => {}
+        }
+        return DashboardAction::Continue;
+    }
+    if *filter_mode {
+        match key {
+            KeyCode::Esc | KeyCode::Enter => *filter_mode = false,
+            KeyCode::Backspace => {
+                let mut filter = dashboard.filter().to_owned();
+                filter.pop();
+                dashboard.set_filter(filter);
+            }
+            KeyCode::Char(character) => {
+                let mut filter = dashboard.filter().to_owned();
+                filter.push(character);
+                dashboard.set_filter(filter);
+            }
+            _ => {}
+        }
+        return DashboardAction::Continue;
+    }
+    match key {
+        KeyCode::Char('q') | KeyCode::Esc => DashboardAction::Exit(None),
+        KeyCode::Up | KeyCode::Char('k') => {
+            dashboard.move_selection(-1);
+            DashboardAction::Continue
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            dashboard.move_selection(1);
+            DashboardAction::Continue
+        }
+        KeyCode::Tab => {
+            dashboard.toggle_selected();
+            DashboardAction::Continue
+        }
+        KeyCode::Char('/') => {
+            *filter_mode = true;
+            DashboardAction::Continue
+        }
+        KeyCode::Char('r') => {
+            if let Some((host, session_id, name)) = dashboard.selected_session() {
+                *rename_editor = Some(RenameEditor::new(host, session_id, name));
+            }
+            DashboardAction::Continue
+        }
+        KeyCode::Enter => {
+            if let Some(target) = dashboard.selected().and_then(|row| row.target.clone()) {
+                DashboardAction::Exit(Some(target))
+            } else {
+                dashboard.toggle_selected();
+                DashboardAction::Continue
+            }
+        }
+        _ => DashboardAction::Continue,
+    }
 }
 
 fn render(
@@ -607,34 +665,6 @@ fn close_terminal(terminal: &mut Tui) -> Result<()> {
     Ok(())
 }
 
-struct PopupGuard {
-    tmux: Tmux,
-    client: String,
-}
-
-impl PopupGuard {
-    fn new(tmux: Tmux, client: String) -> Self {
-        let mut guard = Self { tmux, client };
-        guard.heartbeat();
-        guard
-    }
-
-    fn heartbeat(&mut self) {
-        let expiry = now_ms().saturating_add(2_000).to_string();
-        let _ = self
-            .tmux
-            .set_global_option(&popup_option_name(&self.client), &expiry);
-    }
-}
-
-impl Drop for PopupGuard {
-    fn drop(&mut self) {
-        let _ = self
-            .tmux
-            .unset_global_option(&popup_option_name(&self.client));
-    }
-}
-
 fn elapsed(now: u64, since: u64) -> String {
     let seconds = now.saturating_sub(since) / 1_000;
     if seconds < 60 {
@@ -649,6 +679,42 @@ fn elapsed(now: u64, since: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_movement_events_are_applied_in_one_batch() {
+        let mut host = crate::snapshot::HostSnapshot::empty("local", 1);
+        host.push_test_agent(AgentState::Idle);
+        let mut dashboard = Dashboard::new(AggregateSnapshot {
+            schema_version: crate::snapshot::SCHEMA_VERSION,
+            generated_at_ms: 1,
+            hosts: vec![host],
+        });
+        let mut filter_mode = false;
+        let mut rename_editor = None;
+        let mut status_message = None;
+        let events = [
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('k'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('k'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        ];
+
+        let action = handle_events(
+            events,
+            &mut dashboard,
+            &mut filter_mode,
+            &mut rename_editor,
+            &mut status_message,
+            &Tmux::new(),
+        );
+
+        assert_eq!(action, DashboardAction::Continue);
+        assert_eq!(dashboard.selected().unwrap().kind, RowKind::Host);
+    }
 
     #[test]
     fn rename_editor_keeps_target_identity_while_editing_the_name() {

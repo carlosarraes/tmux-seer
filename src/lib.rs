@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod daemon;
 pub mod model;
 pub mod navigation;
+pub mod popup;
 pub mod reducer;
 pub mod setup;
 pub mod snapshot;
