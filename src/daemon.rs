@@ -147,6 +147,7 @@ pub async fn run() -> Result<()> {
         .collect();
     let mut previous: HashMap<AgentKey, AgentState> = HashMap::new();
     let mut previous_online: HashMap<String, bool> = HashMap::new();
+    let mut previous_widget = None;
     let mut initial = true;
     let mut last_remote = 0;
 
@@ -171,8 +172,15 @@ pub async fn run() -> Result<()> {
             .collect();
         publish_snapshot(&snapshots, now)?;
         let aggregate = aggregate_online(snapshots.iter());
-        tmux.set_global_option("@seer_widget", &status_widget_with(aggregate, &colors))?;
-        tmux.refresh_status();
+        publish_widget_if_changed(
+            &mut previous_widget,
+            status_widget_with(aggregate, &colors),
+            |widget| {
+                tmux.set_global_option("@seer_widget", widget)?;
+                tmux.refresh_status();
+                Ok(())
+            },
+        )?;
 
         for host in &snapshots {
             let was_online = previous_online.get(&host.host).copied();
@@ -342,9 +350,38 @@ fn option(tmux: &Tmux, name: &str, default: &str) -> String {
         .unwrap_or_else(|| default.into())
 }
 
+fn publish_widget_if_changed(
+    previous: &mut Option<String>,
+    widget: String,
+    publish: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    if previous.as_deref() == Some(widget.as_str()) {
+        return Ok(());
+    }
+    publish(&widget)?;
+    *previous = Some(widget);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widget_publishes_only_initial_and_changed_values() {
+        let mut previous = None;
+        let mut published = Vec::new();
+
+        for widget in ["gray", "gray", "green"] {
+            publish_widget_if_changed(&mut previous, widget.to_owned(), |value| {
+                published.push(value.to_owned());
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        assert_eq!(published, ["gray", "green"]);
+    }
 
     #[test]
     fn remote_failure_changes_only_originating_host() {
