@@ -118,6 +118,42 @@ impl ProcessTable {
         None
     }
 
+    fn codex_fallback_state(&self, root: u32) -> Option<AgentState> {
+        let mut queue = VecDeque::from([root]);
+        let mut visited = HashSet::new();
+        let mut runners = HashSet::new();
+        while let Some(pid) = queue.pop_front() {
+            if !visited.insert(pid) {
+                continue;
+            }
+            if self
+                .processes
+                .get(&pid)
+                .is_some_and(|process| detect_agent(&process.command) == Some(AgentKind::Codex))
+            {
+                runners.insert(pid);
+            }
+            queue.extend(
+                self.processes
+                    .iter()
+                    .filter(|(_, process)| process.parent == pid)
+                    .map(|(child, _)| *child),
+            );
+        }
+        if runners.is_empty() {
+            return None;
+        }
+        let has_tool_child = self
+            .processes
+            .iter()
+            .any(|(pid, process)| runners.contains(&process.parent) && !runners.contains(pid));
+        Some(if has_tool_child {
+            AgentState::Working
+        } else {
+            AgentState::Idle
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.processes.is_empty()
     }
@@ -212,10 +248,14 @@ pub fn parse_tmux_rows_with_processes(
             live_agent
         };
         let Some(agent) = agent else { continue };
-        let state = if fields[11].is_empty() || configured_agent != Some(agent) {
-            AgentState::Untracked
-        } else {
+        let state = if !fields[11].is_empty() && configured_agent == Some(agent) {
             AgentState::from_str(fields[11]).unwrap_or(AgentState::Untracked)
+        } else if agent == AgentKind::Codex {
+            pane_pid
+                .and_then(|pid| processes.codex_fallback_state(pid))
+                .unwrap_or(AgentState::Untracked)
+        } else {
+            AgentState::Untracked
         };
 
         let session_id = fields[0].to_owned();

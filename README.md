@@ -9,11 +9,13 @@ Seer is a tmux dashboard for seeing which coding agents are working, idle, or wa
 - Green — working
 - Yellow — idle
 - Blue — needs structured permission or question input
-- Gray — agent detected without working hooks, or a remote host is offline
+- Gray — agent detected without usable lifecycle state, or a remote host is offline
 
 `prefix + S` opens the top-right **Seer** dashboard. It groups agent panes by host, session, and window; windows and panes without a running agent are omitted. Enter jumps to local targets and turns the existing popup into an interactive SSH/tmux view for remote targets.
 
 Seer intentionally does not infer blue from conversational prose and does not send input, stop, or restart agents.
+
+Codex hooks remain authoritative once they emit an event. Before the first event of a newly resumed Codex session, Seer uses the live Codex process tree to distinguish idle from active tool execution instead of leaving the pane untracked.
 
 ## Requirements
 

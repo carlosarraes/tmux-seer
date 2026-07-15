@@ -35,6 +35,7 @@ fn hook_updates_only_seer_pane_options() {
         .env("TMUX_PANE", "%9")
         .env("TMUX_SEER_TMUX", &fake.program)
         .env("TMUX_SEER_TEST_LOG", &fake.log)
+        .env("TMUX_SEER_TEST_RECORD", &fake.record)
         .write_stdin(r#"{"session_id":"s1"}"#)
         .assert()
         .success();
@@ -43,6 +44,40 @@ fn hook_updates_only_seer_pane_options() {
     assert!(log.contains("set-option -p -t %9 @seer_agent_kind claude"));
     assert!(log.contains("set-option -p -t %9 @seer_state idle"));
     assert!(log.contains("@seer_record"));
+}
+
+#[test]
+fn repeated_hook_activity_does_not_rewrite_or_refresh_tmux() {
+    let fake = FakeTmux::new();
+    let run_hook = || {
+        Command::cargo_bin("tmux-seer")
+            .unwrap()
+            .args(["hook", "codex", "PreToolUse"])
+            .env("TMUX_PANE", "%9")
+            .env("TMUX_SEER_TMUX", &fake.program)
+            .env("TMUX_SEER_TEST_LOG", &fake.log)
+            .env("TMUX_SEER_TEST_RECORD", &fake.record)
+            .write_stdin(r#"{"session_id":"s1","turn_id":"t1"}"#)
+            .assert()
+            .success();
+    };
+
+    run_hook();
+    let writes_after_first = fs::read_to_string(&fake.log)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("set-option"))
+        .count();
+    run_hook();
+
+    let log = fs::read_to_string(&fake.log).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with("set-option"))
+            .count(),
+        writes_after_first
+    );
+    assert!(!log.contains("refresh-client"));
 }
 
 #[test]
@@ -99,6 +134,7 @@ struct FakeTmux {
     _directory: TempDir,
     program: std::path::PathBuf,
     log: std::path::PathBuf,
+    record: std::path::PathBuf,
 }
 
 impl FakeTmux {
@@ -106,12 +142,24 @@ impl FakeTmux {
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("tmux");
         let log = directory.path().join("tmux.log");
+        let record = directory.path().join("record.json");
         fs::write(
             &program,
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$TMUX_SEER_TEST_LOG"
 case "$1" in
-  show-options) exit 1 ;;
+  show-options)
+    if [ "${6:-}" = "@seer_record" ] && [ -f "${TMUX_SEER_TEST_RECORD:-}" ]; then
+      cat "$TMUX_SEER_TEST_RECORD"
+      exit 0
+    fi
+    exit 1
+    ;;
+  set-option)
+    if [ "${5:-}" = "@seer_record" ] && [ -n "${TMUX_SEER_TEST_RECORD:-}" ]; then
+      printf '%s' "${6:-}" > "$TMUX_SEER_TEST_RECORD"
+    fi
+    ;;
   list-panes) printf '%s\n' "$TMUX_SEER_ROWS" ;;
 esac
 "#,
@@ -124,6 +172,7 @@ esac
             _directory: directory,
             program,
             log,
+            record,
         }
     }
 }

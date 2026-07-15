@@ -136,7 +136,7 @@ fn widget_accepts_configured_colors() {
 }
 
 #[test]
-fn detects_codex_hidden_below_node_process() {
+fn detects_working_codex_hidden_below_node_process() {
     let input = row(&[
         "$1",
         "main",
@@ -167,7 +167,103 @@ fn detects_codex_hidden_below_node_process() {
     );
     assert_eq!(
         snapshot.sessions[0].windows[0].panes[0].state,
-        AgentState::Untracked
+        AgentState::Working
+    );
+}
+
+#[test]
+fn codex_process_fallback_is_idle_before_the_first_hook_event() {
+    let input = row(&[
+        "$1",
+        "main",
+        "@2",
+        "1",
+        "app",
+        "%4",
+        "1",
+        "/tmp/shop",
+        "101",
+        "zsh",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ]);
+    let processes = ProcessTable::parse(
+        "101 1 zsh\n202 101 node /home/me/.local/bin/codex\n203 202 /opt/codex/bin/codex\n204 203 /opt/codex/bin/codex-code-mode-host",
+    );
+
+    let snapshot = parse_tmux_rows_with_processes("local", 100, &input, &processes).unwrap();
+
+    assert_eq!(
+        snapshot.sessions[0].windows[0].panes[0].state,
+        AgentState::Idle
+    );
+}
+
+#[test]
+fn codex_process_fallback_is_working_while_the_runner_has_a_tool_child() {
+    let input = row(&[
+        "$1",
+        "main",
+        "@2",
+        "1",
+        "app",
+        "%4",
+        "1",
+        "/tmp/shop",
+        "101",
+        "zsh",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ]);
+    let processes = ProcessTable::parse(
+        "101 1 zsh\n202 101 node /home/me/.local/bin/codex\n203 202 /opt/codex/bin/codex\n204 203 /opt/codex/bin/codex-code-mode-host\n205 204 /bin/zsh -c cargo test",
+    );
+
+    let snapshot = parse_tmux_rows_with_processes("local", 100, &input, &processes).unwrap();
+
+    assert_eq!(
+        snapshot.sessions[0].windows[0].panes[0].state,
+        AgentState::Working
+    );
+}
+
+#[test]
+fn codex_process_fallback_detects_a_tool_sibling_of_the_code_mode_host() {
+    let input = row(&[
+        "$1",
+        "main",
+        "@2",
+        "1",
+        "app",
+        "%4",
+        "1",
+        "/tmp/shop",
+        "101",
+        "zsh",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ]);
+    let processes = ProcessTable::parse(
+        "101 1 zsh\n202 101 node /home/me/.local/bin/codex\n203 202 /opt/codex/bin/codex\n204 203 /opt/codex/bin/codex-code-mode-host\n205 203 /bin/zsh -c cargo test",
+    );
+
+    let snapshot = parse_tmux_rows_with_processes("local", 100, &input, &processes).unwrap();
+
+    assert_eq!(
+        snapshot.sessions[0].windows[0].panes[0].state,
+        AgentState::Working
     );
 }
 

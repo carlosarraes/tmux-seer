@@ -100,7 +100,10 @@ impl Tmux {
         let current = self
             .show_pane_option(pane, "@seer_record")
             .and_then(|value| serde_json::from_str::<AgentRecord>(&value).ok());
-        let record = reduce(current, event, now_ms());
+        let record = reduce(current.clone(), event, now_ms());
+        if current.as_ref() == Some(&record) {
+            return Ok(());
+        }
         self.set_pane_option(pane, "@seer_agent_kind", agent_slug(record.agent))?;
         self.set_pane_option(pane, "@seer_state", state_slug(record.state))?;
         self.set_pane_option(
@@ -112,7 +115,6 @@ impl Tmux {
         set_optional(self, pane, "@seer_turn_id", record.active_turn.as_deref())?;
         set_optional(self, pane, "@seer_reason", record.reason.as_deref())?;
         self.set_pane_option(pane, "@seer_record", &serde_json::to_string(&record)?)?;
-        let _ = self.output(["refresh-client", "-S"]);
         Ok(())
     }
 
