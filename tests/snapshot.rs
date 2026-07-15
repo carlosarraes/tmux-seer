@@ -10,6 +10,10 @@ fn row(fields: &[&str]) -> String {
     fields.join(&SEP.to_string())
 }
 
+fn tmux_35_row(fields: &[&str]) -> String {
+    fields.join(r"\037")
+}
+
 #[test]
 fn parses_only_agent_panes_and_preserves_hierarchy() {
     let input = [
@@ -64,6 +68,39 @@ fn parses_only_agent_panes_and_preserves_hierarchy() {
     assert_eq!(
         snapshot.sessions[0].windows[0].panes[0].state,
         AgentState::Working
+    );
+}
+
+#[test]
+fn parses_separators_escaped_by_tmux_35() {
+    let input = tmux_35_row(&[
+        "$1",
+        "main",
+        "@2",
+        "1",
+        "app",
+        "%4",
+        "1",
+        "/tmp/shop",
+        "101",
+        "claude",
+        "claude",
+        "idle",
+        "50",
+        "s1",
+        "",
+        "",
+    ]);
+
+    let snapshot = parse_tmux_rows("zapsign", 100, &input).unwrap();
+
+    assert_eq!(
+        snapshot.sessions[0].windows[0].panes[0].agent,
+        AgentKind::Claude
+    );
+    assert_eq!(
+        snapshot.sessions[0].windows[0].panes[0].state,
+        AgentState::Idle
     );
 }
 

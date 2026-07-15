@@ -11,6 +11,7 @@ use crate::model::{AgentKind, AgentState};
 
 pub const SCHEMA_VERSION: u16 = 1;
 const FIELD_SEPARATOR: char = '\u{1f}';
+const TMUX_ESCAPED_FIELD_SEPARATOR: &str = r"\037";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentKey {
@@ -228,7 +229,11 @@ pub fn parse_tmux_rows_with_processes(
         if line.trim().is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split(FIELD_SEPARATOR).collect();
+        let fields: Vec<&str> = if line.contains(FIELD_SEPARATOR) {
+            line.split(FIELD_SEPARATOR).collect()
+        } else {
+            line.split(TMUX_ESCAPED_FIELD_SEPARATOR).collect()
+        };
         if fields.len() != 16 {
             bail!(
                 "tmux row {} has {} fields, expected 16",
