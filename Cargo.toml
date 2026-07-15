@@ -15,6 +15,7 @@ fs2 = "0.4"
 ratatui = "0.29"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+similar = "3.1"
 thiserror = "2.0"
 tokio = { version = "1.45", features = ["macros", "process", "rt-multi-thread", "signal", "time"] }
 

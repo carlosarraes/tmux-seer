@@ -2,7 +2,7 @@
 
 Seer is a tmux dashboard for seeing which coding agents are working, idle, or waiting for structured input across tmux sessions and explicitly configured SSH hosts.
 
-> **Status:** pre-release development. Source installation is available now. TPM installation becomes usable after the first GitHub Release contains matching binaries; this README does not imply that a release already exists.
+> **Status:** early development. Binary releases and TPM installation are available.
 
 ## What it shows
 
@@ -25,7 +25,7 @@ Seer intentionally does not infer blue from conversational prose and does not se
 
 ## Source installation
 
-Until a release exists, install from source:
+To install from source:
 
 ```sh
 git clone https://github.com/carlosarraes/tmux-seer.git
@@ -49,7 +49,7 @@ tmux-seer setup
 
 ## Binary installation
 
-After the first release, download and verify the matching binary with:
+Download and verify the latest binary release with:
 
 ```sh
 curl -fsSL https://github.com/carlosarraes/tmux-seer/releases/latest/download/install.sh | sh
@@ -59,7 +59,7 @@ Set `TMUX_SEER_VERSION=v0.1.0` to pin a release or `TMUX_SEER_INSTALL_PATH` to c
 
 ## TPM installation
 
-After the first release is published, add the plugin after status/theme plugins and before TPM's final `run` line:
+Add the plugin after status/theme plugins and before TPM's final `run` line:
 
 ```tmux
 set -g @plugin 'carlosarraes/tmux-seer'
@@ -79,7 +79,7 @@ tmux-seer setup
 tmux-seer doctor
 ```
 
-The setup picker detects Claude, Codex, and Pi on each host, previews selected changes, preserves unrelated hook configuration, and creates backups for changed files. Codex requires reviewing the new definitions through `/hooks` before they run.
+The setup picker detects Claude, Codex, and Pi on each host. After you choose integrations, it leaves the picker and prints an exact unified diff in terminal scrollback. JSON is normalized first so formatting-only differences do not obscure the hook changes. Nothing is written until you explicitly answer `y` to `Apply these changes? [y/N]`; cancellation is the default. Setup preserves unrelated hook configuration and creates backups for changed files. Codex requires reviewing the new definitions through `/hooks` before they run.
 
 ## Configuration
 
@@ -109,7 +109,7 @@ Status-square colors default to `#9ece6a`, `#e0af68`, `#7aa2f7`, and `#565f89` t
 
 Hosts are never scanned automatically. Seer uses only aliases in `@seer_hosts`, respects your SSH configuration and host-key policy, and uses batch mode with a short connection timeout.
 
-Each remote host needs `~/.local/bin/tmux-seer`. Before the first release, build and install it from source on that host. Once releases exist, setup and the standalone installer use the matching release artifact.
+Each remote host needs `~/.local/bin/tmux-seer`. Setup and the standalone installer use the matching release artifact.
 
 ## Uninstalling agent hooks
 

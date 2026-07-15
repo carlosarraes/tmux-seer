@@ -1,9 +1,91 @@
-use std::fs;
+use std::{fs, io::Cursor, process::Command};
 use tempfile::tempdir;
 use tmux_seer::setup::{
-    apply_json_integration, merge_hook_json, pi_extension_source, preview_target,
+    apply_json_integration, apply_pi_extension, confirm_apply, merge_hook_json,
+    pi_extension_source, preview_integration_change, preview_target, remote_preview_script,
     remote_setup_script, snapshot_freshness, Integration, SetupItem, SetupModel,
 };
+
+#[test]
+fn claude_preview_shows_only_normalized_seer_changes() {
+    let original = br#"{"custom":true,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo existing"}]}]}}"#;
+
+    let preview = preview_integration_change(
+        original,
+        Integration::Claude,
+        false,
+        "~/.claude/settings.json",
+    )
+    .unwrap();
+
+    assert!(preview.contains("--- ~/.claude/settings.json (normalized)"));
+    assert!(preview.contains("+++ ~/.claude/settings.json (after)"));
+    assert!(preview.lines().any(|line| {
+        line.starts_with('+') && line.contains("\"command\": \"tmux-seer hook claude Stop\"")
+    }));
+    assert!(!preview.contains("-  \"custom\": true"));
+    assert!(!preview.contains("+  \"custom\": true"));
+    assert!(!preview.contains("-          \"command\": \"echo existing\""));
+}
+
+#[test]
+fn setup_confirmation_defaults_to_no() {
+    for answer in ["\n", "n\n", "anything\n"] {
+        let mut output = Vec::new();
+        let confirmed = confirm_apply(Cursor::new(answer), &mut output).unwrap();
+        assert!(!confirmed);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Apply these changes? [y/N] "
+        );
+    }
+
+    assert!(confirm_apply(Cursor::new("yes\n"), Vec::new()).unwrap());
+}
+
+#[test]
+fn pi_preview_refuses_to_replace_an_unmanaged_extension() {
+    let error = preview_integration_change(
+        b"export default function customExtension() {}\n",
+        Integration::Pi,
+        false,
+        "local:~/.pi/agent/extensions/tmux-seer.ts",
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("refusing to replace non-Seer file"));
+}
+
+#[test]
+fn pi_apply_and_uninstall_use_the_same_managed_content_as_the_preview() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("tmux-seer.ts");
+
+    let installed = apply_pi_extension(&path, false).unwrap();
+    assert!(installed.changed);
+    assert_eq!(fs::read_to_string(&path).unwrap(), pi_extension_source());
+
+    let removed = apply_pi_extension(&path, true).unwrap();
+    assert!(removed.changed);
+    assert!(!path.exists());
+    assert_eq!(
+        fs::read_to_string(removed.backup.unwrap()).unwrap(),
+        pi_extension_source()
+    );
+}
+
+#[test]
+fn remote_preview_scripts_are_valid_shell() {
+    for integration in Integration::ALL {
+        assert!(Command::new("sh")
+            .args(["-n", "-c", remote_preview_script(integration)])
+            .status()
+            .unwrap()
+            .success());
+    }
+}
 
 #[test]
 fn hook_merge_preserves_unrelated_entries_and_is_idempotent() {

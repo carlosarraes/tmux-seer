@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, Stdout},
+    io::{self, BufRead, Stdout, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
@@ -19,10 +19,11 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 use serde_json::{json, Map, Value};
+use similar::TextDiff;
 
 use crate::{
     daemon::runtime_snapshot_path,
@@ -68,7 +69,6 @@ pub struct SetupModel {
     pub items: Vec<SetupItem>,
     pub cursor: usize,
     pub uninstall: bool,
-    pub reviewing: bool,
 }
 
 impl SetupModel {
@@ -84,7 +84,6 @@ impl SetupModel {
             items,
             cursor: 0,
             uninstall,
-            reviewing: false,
         }
     }
 
@@ -206,6 +205,62 @@ pub fn merge_hook_json(
     Ok(root)
 }
 
+pub fn preview_integration_change(
+    original_bytes: &[u8],
+    integration: Integration,
+    uninstall: bool,
+    target: &str,
+) -> Result<String> {
+    let (before, after) = match integration {
+        Integration::Claude | Integration::Codex => {
+            let original: Value = serde_json::from_slice(original_bytes)
+                .with_context(|| format!("{target} contains malformed JSON"))?;
+            let merged = merge_hook_json(original.clone(), integration, uninstall)?;
+            (pretty_json(&original)?, pretty_json(&merged)?)
+        }
+        Integration::Pi => {
+            let original = std::str::from_utf8(original_bytes)
+                .with_context(|| format!("{target} contains non-UTF-8 data"))?;
+            (
+                original.to_owned(),
+                merge_pi_extension(original, uninstall, target)?,
+            )
+        }
+    };
+
+    if before == after {
+        return Ok(format!("No changes for {target}\n"));
+    }
+    let before_label = match integration {
+        Integration::Claude | Integration::Codex => format!("{target} (normalized)"),
+        Integration::Pi => format!("{target} (current)"),
+    };
+    let after_label = format!("{target} (after)");
+    Ok(TextDiff::from_lines(&before, &after)
+        .unified_diff()
+        .context_radius(1)
+        .header(&before_label, &after_label)
+        .to_string())
+}
+
+pub fn confirm_apply(input: impl BufRead, mut output: impl Write) -> Result<bool> {
+    write!(output, "Apply these changes? [y/N] ")?;
+    output.flush()?;
+    let mut answer = String::new();
+    let mut input = input;
+    input.read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn pretty_json(value: &Value) -> Result<String> {
+    let mut rendered = serde_json::to_string_pretty(value)?;
+    rendered.push('\n');
+    Ok(rendered)
+}
+
 pub fn apply_json_integration(
     path: &Path,
     integration: Integration,
@@ -275,47 +330,55 @@ export default function seer(pi: ExtensionAPI): void {
 }
 
 pub fn apply_pi_extension(path: &Path, uninstall: bool) -> Result<ApplyResult> {
+    let existed = path.exists();
+    let existing = if existed {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+    let updated = merge_pi_extension(&existing, uninstall, &path.display().to_string())?;
+    if updated == existing {
+        return Ok(ApplyResult {
+            changed: false,
+            backup: None,
+        });
+    }
+    let backup = existed.then(|| unique_backup(path)).transpose()?;
     if uninstall {
-        if !path.exists() {
-            return Ok(ApplyResult {
-                changed: false,
-                backup: None,
-            });
-        }
-        let existing = fs::read_to_string(path)?;
-        if !existing.starts_with("// Managed by tmux-seer") {
-            bail!("refusing to remove non-Seer file at {}", path.display());
-        }
-        let backup = Some(unique_backup(path)?);
         fs::remove_file(path)?;
         return Ok(ApplyResult {
             changed: true,
             backup,
         });
     }
-    let source = pi_extension_source();
-    if fs::read_to_string(path).ok().as_deref() == Some(source) {
-        return Ok(ApplyResult {
-            changed: false,
-            backup: None,
-        });
-    }
-    if path.exists() {
-        let existing = fs::read_to_string(path)?;
-        if !existing.starts_with("// Managed by tmux-seer") {
-            bail!("refusing to replace non-Seer file at {}", path.display());
-        }
-    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let backup = path.exists().then(|| unique_backup(path)).transpose()?;
     let temporary = path.with_extension("seer.tmp");
-    fs::write(&temporary, source)?;
+    fs::write(&temporary, updated)?;
     fs::rename(temporary, path)?;
     Ok(ApplyResult {
         changed: true,
         backup,
+    })
+}
+
+fn merge_pi_extension(original: &str, uninstall: bool, target: &str) -> Result<String> {
+    if original.is_empty() {
+        return Ok(if uninstall {
+            String::new()
+        } else {
+            pi_extension_source().to_owned()
+        });
+    }
+    if !original.starts_with("// Managed by tmux-seer") {
+        let action = if uninstall { "remove" } else { "replace" };
+        bail!("refusing to {action} non-Seer file at {target}");
+    }
+    Ok(if uninstall {
+        String::new()
+    } else {
+        pi_extension_source().to_owned()
     })
 }
 
@@ -326,6 +389,18 @@ pub fn run(uninstall: bool) -> Result<()> {
         println!("No integrations selected; nothing changed.");
         return Ok(());
     }
+    println!("Review exact normalized changes:\n");
+    for preview in preview_selected(&selected, uninstall)? {
+        print!("{preview}");
+        if !preview.ends_with("\n\n") {
+            println!();
+        }
+    }
+    if !confirm_apply(io::stdin().lock(), io::stdout().lock())? {
+        println!("\nCancelled; nothing changed.");
+        return Ok(());
+    }
+    println!();
     let messages = apply_selected(&selected, uninstall)?;
     for message in messages {
         println!("{message}");
@@ -526,6 +601,67 @@ fn remote_binary_available(host: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+fn preview_selected(items: &[SetupItem], uninstall: bool) -> Result<Vec<String>> {
+    items
+        .iter()
+        .filter(|item| item.selected)
+        .map(|item| {
+            let target = preview_target(&item.host, item.integration);
+            let original = read_integration(item)?;
+            preview_integration_change(&original, item.integration, uninstall, &target)
+        })
+        .collect()
+}
+
+fn read_integration(item: &SetupItem) -> Result<Vec<u8>> {
+    let target = preview_target(&item.host, item.integration);
+    if item.host == "local" {
+        let path = integration_path(&home_directory(), item.integration);
+        return if path.exists() {
+            fs::read(&path).with_context(|| format!("failed to read {}", path.display()))
+        } else if item.integration == Integration::Pi {
+            Ok(Vec::new())
+        } else {
+            Ok(b"{}".to_vec())
+        };
+    }
+
+    validate_host(&item.host)?;
+    let ssh = env::var_os("TMUX_SEER_SSH").unwrap_or_else(|| "ssh".into());
+    let output = Command::new(ssh)
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=2",
+            &item.host,
+            remote_preview_script(item.integration),
+        ])
+        .output()
+        .with_context(|| format!("failed to read {target} over SSH"))?;
+    if !output.status.success() {
+        bail!(
+            "failed to read {target}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output.stdout)
+}
+
+pub const fn remote_preview_script(integration: Integration) -> &'static str {
+    match integration {
+        Integration::Claude => {
+            r#"file="$HOME/.claude/settings.json"; if test -f "$file"; then cat "$file"; else printf '{}'; fi"#
+        }
+        Integration::Codex => {
+            r#"file="$HOME/.codex/hooks.json"; if test -f "$file"; then cat "$file"; else printf '{}'; fi"#
+        }
+        Integration::Pi => {
+            r#"file="$HOME/.pi/agent/extensions/tmux-seer.ts"; if test -f "$file"; then cat "$file"; else :; fi"#
+        }
+    }
+}
+
 fn apply_selected(items: &[SetupItem], uninstall: bool) -> Result<Vec<String>> {
     let mut messages = Vec::new();
     let local: Vec<_> = items
@@ -682,29 +818,18 @@ fn picker_loop(terminal: &mut SetupTerminal, model: &mut SetupModel) -> Result<V
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        if model.reviewing {
-            match key.code {
-                KeyCode::Enter => {
-                    return Ok(model
-                        .items
-                        .iter()
-                        .filter(|item| item.selected)
-                        .cloned()
-                        .collect());
-                }
-                KeyCode::Char('r') | KeyCode::Esc => model.reviewing = false,
-                KeyCode::Char('q') => return Ok(Vec::new()),
-                _ => {}
-            }
-            continue;
-        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => model.move_cursor(-1),
             KeyCode::Down | KeyCode::Char('j') => model.move_cursor(1),
             KeyCode::Char(' ') => model.toggle(),
             KeyCode::Char('a') => model.toggle_all(),
             KeyCode::Enter if model.items.iter().any(|item| item.selected) => {
-                model.reviewing = true
+                return Ok(model
+                    .items
+                    .iter()
+                    .filter(|item| item.selected)
+                    .cloned()
+                    .collect());
             }
             KeyCode::Char('q') | KeyCode::Esc => return Ok(Vec::new()),
             _ => {}
@@ -729,37 +854,6 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, model: &SetupModel) {
             .style(Style::default().add_modifier(Modifier::BOLD)),
         header,
     );
-    if model.reviewing {
-        let lines = model
-            .items
-            .iter()
-            .filter(|item| item.selected)
-            .map(|item| {
-                Line::from(format!(
-                    "{} {} — {}",
-                    preview_target(&item.host, item.integration),
-                    item.integration.display(),
-                    if model.uninstall {
-                        "remove Seer-owned integration"
-                    } else {
-                        "install/merge Seer integration"
-                    }
-                ))
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title("Review exact targets")
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: false }),
-            body,
-        );
-        frame.render_widget(Paragraph::new("Enter apply · r back · q cancel"), footer);
-        return;
-    }
     let items = model.items.iter().map(|item| {
         let checkbox = if item.selected { "[x]" } else { "[ ]" };
         let status = if !item.available {
@@ -790,7 +884,7 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, model: &SetupModel) {
         &mut state,
     );
     frame.render_widget(
-        Paragraph::new("↑↓/jk move · Space toggle · a all · Enter review · q cancel"),
+        Paragraph::new("↑↓/jk move · Space toggle · a all · Enter preview · q cancel"),
         footer,
     );
 }
