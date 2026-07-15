@@ -1,0 +1,6 @@
+/target/
+/.superpowers/
+/docs/superpowers/plans/
+/.worktrees/
+*.swp
+*.tmp
