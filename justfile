@@ -40,8 +40,6 @@ release version:
       exit 1
     fi
 
-    just check
-
     temporary="$(mktemp)"
     trap 'rm -f "$temporary"' EXIT
     awk -v version="$version" '
@@ -57,7 +55,7 @@ release version:
     mv "$temporary" Cargo.toml
     trap - EXIT
 
-    cargo check
+    just check
     git add Cargo.toml Cargo.lock
     if git diff --cached --quiet; then
       echo "Cargo.toml is already at $version; tagging the current commit"

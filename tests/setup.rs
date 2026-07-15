@@ -121,10 +121,12 @@ fn uninstall_preselects_only_configured_integrations() {
 #[test]
 fn remote_setup_bootstraps_version_matched_binary_before_hooks() {
     let script = remote_setup_script("claude,codex", false);
-    assert!(script
-        .contains("https://github.com/carlosarraes/tmux-seer/releases/download/v0.1.0/install.sh"));
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(script.contains(&format!(
+        "https://github.com/carlosarraes/tmux-seer/releases/download/v{version}/install.sh"
+    )));
     assert!(!script.contains("raw.githubusercontent.com"));
-    assert!(script.contains("TMUX_SEER_VERSION=v0.1.0"));
+    assert!(script.contains(&format!("TMUX_SEER_VERSION=v{version}")));
     assert!(script.contains("setup --non-interactive --agents claude,codex"));
 }
 
