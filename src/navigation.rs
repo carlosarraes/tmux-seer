@@ -1,8 +1,29 @@
-use anyhow::{bail, Result};
+use std::{process::Command, thread, time::Duration};
 
-use crate::{snapshot::AgentKey, tmux::Tmux};
+use anyhow::{bail, Context, Result};
 
-const BRIDGE_SESSION: &str = "__seer_bridges";
+use crate::{
+    daemon::popup_option_name,
+    snapshot::AgentKey,
+    tmux::{now_ms, Tmux},
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NavigationTarget {
+    Host {
+        host: String,
+    },
+    Session {
+        host: String,
+        session_id: String,
+    },
+    Window {
+        host: String,
+        session_id: String,
+        window_id: String,
+    },
+    Agent(AgentKey),
+}
 
 #[derive(Debug, Clone)]
 pub struct Navigator {
@@ -12,6 +33,73 @@ pub struct Navigator {
 impl Navigator {
     pub fn new(tmux: Tmux) -> Self {
         Self { tmux }
+    }
+
+    pub fn navigate(&self, target: &NavigationTarget, client: Option<&str>) -> Result<()> {
+        match target {
+            NavigationTarget::Session { host, session_id } if host == "local" => {
+                validate_tmux_id(session_id, '$', "session")?;
+                self.switch_client(session_id, client)
+            }
+            NavigationTarget::Window {
+                host,
+                session_id,
+                window_id,
+            } if host == "local" => {
+                validate_tmux_id(session_id, '$', "session")?;
+                validate_tmux_id(window_id, '@', "window")?;
+                self.switch_client(session_id, client)?;
+                self.tmux
+                    .output(["select-window", "-t", &format!("{session_id}:{window_id}")])?;
+                Ok(())
+            }
+            NavigationTarget::Host { host } => self.remote_attach(host, None, None, None, client),
+            NavigationTarget::Session { host, session_id } => {
+                self.remote_attach(host, Some(session_id), None, None, client)
+            }
+            NavigationTarget::Window {
+                host,
+                session_id,
+                window_id,
+            } => self.remote_attach(host, Some(session_id), Some(window_id), None, client),
+            NavigationTarget::Agent(key) => self.jump(key, client),
+        }
+    }
+
+    pub fn rename_session(&self, host: &str, session_id: &str, name: &str) -> Result<()> {
+        validate_host(host)?;
+        validate_tmux_id(session_id, '$', "session")?;
+        if name.trim().is_empty() {
+            bail!("session name cannot be empty");
+        }
+        if host == "local" {
+            self.tmux
+                .output(["rename-session", "-t", session_id, name])?;
+            return Ok(());
+        }
+
+        let ssh = std::env::var_os("TMUX_SEER_SSH").unwrap_or_else(|| "ssh".into());
+        let command = format!(
+            "tmux rename-session -t {} {}",
+            shell_quote(session_id),
+            shell_quote(name),
+        );
+        let output = Command::new(ssh)
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=2",
+                host,
+                &command,
+            ])
+            .output()
+            .with_context(|| format!("failed to rename tmux session on {host}"))?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            bail!("remote tmux rename failed on {host}: {}", error.trim());
+        }
+        Ok(())
     }
 
     pub fn jump(&self, key: &AgentKey, client: Option<&str>) -> Result<()> {
@@ -24,15 +112,7 @@ impl Navigator {
     }
 
     fn local_jump(&self, key: &AgentKey, client: Option<&str>) -> Result<()> {
-        match client {
-            Some(client) => {
-                self.tmux
-                    .output(["switch-client", "-c", client, "-t", &key.session_id])?;
-            }
-            None => {
-                self.tmux.output(["switch-client", "-t", &key.session_id])?;
-            }
-        }
+        self.switch_client(&key.session_id, client)?;
         self.tmux.output([
             "select-window",
             "-t",
@@ -42,102 +122,148 @@ impl Navigator {
         Ok(())
     }
 
-    fn remote_jump(&self, key: &AgentKey, client: Option<&str>) -> Result<()> {
-        let window_name = format!("seer:{}", key.host);
-        let remote = format!(
-            "tmux select-window -t {} \\; select-pane -t {} \\; attach-session -t {}",
-            shell_quote(&format!("{}:{}", key.session_id, key.window_id)),
-            shell_quote(&key.pane_id),
-            shell_quote(&key.session_id),
-        );
-        let ssh_command = format!("ssh -tt {} {}", key.host, shell_quote(&remote));
-        let has_bridge_session = self
-            .tmux
-            .output(["has-session", "-t", &format!("={BRIDGE_SESSION}")])
-            .is_ok();
-        if !has_bridge_session {
-            self.tmux.output([
-                "new-session",
-                "-d",
-                "-s",
-                BRIDGE_SESSION,
-                "-n",
-                &window_name,
-                &ssh_command,
-            ])?;
-        } else {
-            let windows = self
-                .tmux
-                .output(["list-windows", "-t", BRIDGE_SESSION, "-F", "#{window_name}"])
-                .unwrap_or_default();
-            if windows.lines().any(|name| name == window_name) {
-                self.tmux.output([
-                    "respawn-pane",
-                    "-k",
-                    "-t",
-                    &format!("{BRIDGE_SESSION}:{window_name}"),
-                    &ssh_command,
-                ])?;
-            } else {
-                self.tmux.output([
-                    "new-window",
-                    "-d",
-                    "-t",
-                    &format!("{BRIDGE_SESSION}:"),
-                    "-n",
-                    &window_name,
-                    &ssh_command,
-                ])?;
-            }
-        }
-
-        let local_session = match client {
-            Some(client) => self
-                .tmux
-                .output(["display-message", "-p", "-t", client, "#{session_id}"])?
-                .trim()
-                .to_owned(),
-            None => self
-                .tmux
-                .output(["display-message", "-p", "#{session_id}"])?
-                .trim()
-                .to_owned(),
-        };
-        let _ = self.tmux.output([
-            "link-window",
-            "-s",
-            &format!("={BRIDGE_SESSION}:{window_name}"),
-            "-t",
-            &format!("{local_session}:"),
-        ]);
-        let target = format!("{local_session}:{window_name}");
+    fn switch_client(&self, session_id: &str, client: Option<&str>) -> Result<()> {
         match client {
             Some(client) => {
                 self.tmux
-                    .output(["switch-client", "-c", client, "-t", &target])?;
+                    .output(["switch-client", "-c", client, "-t", session_id])?;
             }
             None => {
-                self.tmux.output(["switch-client", "-t", &target])?;
+                self.tmux.output(["switch-client", "-t", session_id])?;
             }
+        }
+        Ok(())
+    }
+
+    fn remote_jump(&self, key: &AgentKey, client: Option<&str>) -> Result<()> {
+        self.remote_attach(
+            &key.host,
+            Some(&key.session_id),
+            Some(&key.window_id),
+            Some(&key.pane_id),
+            client,
+        )
+    }
+
+    fn remote_attach(
+        &self,
+        host: &str,
+        session_id: Option<&str>,
+        window_id: Option<&str>,
+        pane_id: Option<&str>,
+        client: Option<&str>,
+    ) -> Result<()> {
+        validate_host(host)?;
+        if let Some(session_id) = session_id {
+            validate_tmux_id(session_id, '$', "session")?;
+        }
+        if let Some(window_id) = window_id {
+            validate_tmux_id(window_id, '@', "window")?;
+        }
+        if let Some(pane_id) = pane_id {
+            validate_tmux_id(pane_id, '%', "pane")?;
+        }
+
+        let remote = match (session_id, window_id, pane_id) {
+            (None, None, None) => "exec tmux attach-session".to_owned(),
+            (Some(session), None, None) => {
+                format!("exec tmux attach-session -t {}", shell_quote(session))
+            }
+            (Some(session), Some(window), None) => format!(
+                "tmux select-window -t {} \\; exec tmux attach-session -t {}",
+                shell_quote(&format!("{session}:{window}")),
+                shell_quote(session),
+            ),
+            (Some(session), Some(window), Some(pane)) => format!(
+                "tmux select-window -t {} \\; select-pane -t {} \\; exec tmux attach-session -t {}",
+                shell_quote(&format!("{session}:{window}")),
+                shell_quote(pane),
+                shell_quote(session),
+            ),
+            _ => bail!("incomplete remote tmux target"),
+        };
+        let ssh = std::env::var_os("TMUX_SEER_SSH").unwrap_or_else(|| "ssh".into());
+        let mut suppression = client.map(|client| PopupSuppression::new(&self.tmux, client));
+        let mut child = Command::new(ssh)
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=2",
+                "-tt",
+                host,
+                &remote,
+            ])
+            .spawn()
+            .with_context(|| format!("failed to open remote tmux on {host}"))?;
+        let status = loop {
+            if let Some(suppression) = suppression.as_mut() {
+                suppression.heartbeat();
+            }
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            thread::sleep(Duration::from_millis(250));
+        };
+        if !status.success() {
+            bail!("remote tmux attachment failed on {host}");
         }
         Ok(())
     }
 }
 
-fn validate_target(key: &AgentKey) -> Result<()> {
-    if key.host.is_empty()
-        || !key
-            .host
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
-    {
-        bail!("invalid host alias: {}", key.host);
+struct PopupSuppression<'a> {
+    tmux: &'a Tmux,
+    option: String,
+}
+
+impl<'a> PopupSuppression<'a> {
+    fn new(tmux: &'a Tmux, client: &str) -> Self {
+        let mut suppression = Self {
+            tmux,
+            option: popup_option_name(client),
+        };
+        suppression.heartbeat();
+        suppression
     }
+
+    fn heartbeat(&mut self) {
+        let expiry = now_ms().saturating_add(2_000).to_string();
+        let _ = self.tmux.set_global_option(&self.option, &expiry);
+    }
+}
+
+impl Drop for PopupSuppression<'_> {
+    fn drop(&mut self) {
+        let _ = self.tmux.unset_global_option(&self.option);
+    }
+}
+
+fn validate_target(key: &AgentKey) -> Result<()> {
+    validate_host(&key.host)?;
     if !key.session_id.starts_with('$')
         || !key.window_id.starts_with('@')
         || !key.pane_id.starts_with('%')
     {
         bail!("invalid tmux target identifiers");
+    }
+    Ok(())
+}
+
+fn validate_host(host: &str) -> Result<()> {
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        bail!("invalid host alias: {host}");
+    }
+    Ok(())
+}
+
+fn validate_tmux_id(value: &str, prefix: char, label: &str) -> Result<()> {
+    if !value.starts_with(prefix) {
+        bail!("invalid {label} identifier: {value}");
     }
     Ok(())
 }

@@ -11,7 +11,7 @@ Seer is a tmux dashboard for seeing which coding agents are working, idle, or wa
 - Blue — needs structured permission or question input
 - Gray — agent detected without working hooks, or a remote host is offline
 
-`prefix + S` opens the top-right **Seer** dashboard. It groups agent panes by host, session, and window, and Enter jumps to the selected pane. Remote selections use a reusable local `seer:<host>` SSH bridge window.
+`prefix + S` opens the top-right **Seer** dashboard. It groups agent panes by host, session, and window; windows and panes without a running agent are omitted. Enter jumps to local targets and turns the existing popup into an interactive SSH/tmux view for remote targets.
 
 Seer intentionally does not infer blue from conversational prose and does not send input, stop, or restart agents.
 
@@ -100,9 +100,10 @@ Status-square colors default to `#9ece6a`, `#e0af68`, `#7aa2f7`, and `#565f89` t
 | Key | Action |
 |---|---|
 | `↑` / `↓`, `j` / `k` | Move |
-| `Tab` | Fold or expand a group |
+| `Tab` | Fold or expand the selected group; from an agent, fold its session |
 | `/` | Filter |
-| `Enter` | Jump to an agent pane |
+| `Enter` | Connect to a remote host or jump to the selected session, window, or agent pane |
+| `r` | Rename the selected local or remote session inline |
 | `q`, `Esc` | Close |
 
 ## Remote hosts
@@ -110,6 +111,8 @@ Status-square colors default to `#9ece6a`, `#e0af68`, `#7aa2f7`, and `#565f89` t
 Hosts are never scanned automatically. Seer uses only aliases in `@seer_hosts`, respects your SSH configuration and host-key policy, and uses batch mode with a short connection timeout.
 
 Each remote host needs `~/.local/bin/tmux-seer`. Setup and the standalone installer use the matching release artifact.
+
+Selecting any remote host, session, window, or agent reuses the Seer popup for an interactive remote tmux attachment. Press `Escape` to close only the popup and SSH client; the remote tmux session and its agents continue running.
 
 ## Uninstalling agent hooks
 

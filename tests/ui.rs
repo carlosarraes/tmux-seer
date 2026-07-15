@@ -1,21 +1,26 @@
 use tmux_seer::{
     model::AgentState,
+    navigation::NavigationTarget,
     snapshot::{AggregateSnapshot, HostSnapshot, SCHEMA_VERSION},
     ui::{Dashboard, RowKind},
 };
 
-fn dashboard_with(states: &[AgentState]) -> Dashboard {
+fn snapshot_with(states: &[AgentState]) -> AggregateSnapshot {
     let mut hosts = Vec::new();
     for (index, state) in states.iter().copied().enumerate() {
         let mut host = HostSnapshot::empty(format!("host-{index}"), 1);
         host.push_test_agent(state);
         hosts.push(host);
     }
-    Dashboard::new(AggregateSnapshot {
+    AggregateSnapshot {
         schema_version: SCHEMA_VERSION,
         generated_at_ms: 10,
         hosts,
-    })
+    }
+}
+
+fn dashboard_with(states: &[AgentState]) -> Dashboard {
+    Dashboard::new(snapshot_with(states))
 }
 
 #[test]
@@ -93,4 +98,104 @@ fn offline_blue_agent_does_not_steal_initial_selection() {
     let selected = dashboard.selected().unwrap();
     assert_eq!(selected.state, Some(AgentState::Idle));
     assert!(!selected.offline);
+}
+
+#[test]
+fn tab_on_agent_folds_its_containing_session() {
+    let mut dashboard = dashboard_with(&[AgentState::Working]);
+    assert_eq!(dashboard.selected().unwrap().kind, RowKind::Agent);
+    let expanded_rows = dashboard.rows().len();
+
+    dashboard.toggle_selected();
+
+    assert!(dashboard.rows().len() < expanded_rows);
+    assert_eq!(dashboard.selected().unwrap().kind, RowKind::Session);
+}
+
+#[test]
+fn hierarchy_rows_expose_typed_navigation_targets() {
+    let dashboard = dashboard_with(&[AgentState::Working]);
+    let host = dashboard
+        .rows()
+        .iter()
+        .find(|row| row.kind == RowKind::Host)
+        .unwrap();
+    let session = dashboard
+        .rows()
+        .iter()
+        .find(|row| row.kind == RowKind::Session)
+        .unwrap();
+    let agent = dashboard
+        .rows()
+        .iter()
+        .find(|row| row.kind == RowKind::Agent)
+        .unwrap();
+
+    assert_eq!(
+        host.target,
+        Some(NavigationTarget::Host {
+            host: "host-0".into()
+        })
+    );
+    assert_eq!(
+        session.target,
+        Some(NavigationTarget::Session {
+            host: "host-0".into(),
+            session_id: "$test".into(),
+        })
+    );
+    assert!(matches!(agent.target, Some(NavigationTarget::Agent(_))));
+}
+
+#[test]
+fn shortcut_hint_matches_the_highlighted_row_actions() {
+    let mut dashboard = dashboard_with(&[AgentState::Working]);
+    assert_eq!(
+        dashboard.shortcut_hint(),
+        "↑↓/jk move · Tab fold session · / filter · Enter jump pane · q close"
+    );
+
+    dashboard.move_selection(-1);
+    assert_eq!(
+        dashboard.shortcut_hint(),
+        "↑↓/jk move · Tab fold · / filter · Enter jump session · r rename · q close"
+    );
+
+    dashboard.move_selection(-1);
+    assert_eq!(
+        dashboard.shortcut_hint(),
+        "↑↓/jk move · Tab fold · / filter · Enter connect · q close"
+    );
+}
+
+#[test]
+fn selected_session_can_be_renamed_optimistically_by_stable_id() {
+    let mut dashboard = dashboard_with(&[AgentState::Working]);
+    let stale_snapshot = snapshot_with(&[AgentState::Working]);
+    dashboard.move_selection(-1);
+
+    assert_eq!(
+        dashboard.selected_session(),
+        Some(("host-0".into(), "$test".into(), "test".into()))
+    );
+
+    dashboard.update_session_name("host-0", "$test", "deep work");
+    dashboard.replace_snapshot(stale_snapshot);
+    let session = dashboard
+        .rows()
+        .iter()
+        .find(|row| row.kind == RowKind::Session)
+        .unwrap();
+    assert_eq!(session.label, "deep work");
+}
+
+#[test]
+fn offline_rows_do_not_advertise_navigation() {
+    let mut snapshot = snapshot_with(&[AgentState::Idle]);
+    snapshot.hosts[0].online = false;
+    let mut dashboard = Dashboard::new(snapshot);
+    dashboard.move_selection(2);
+
+    assert_eq!(dashboard.selected().unwrap().kind, RowKind::Agent);
+    assert!(!dashboard.shortcut_hint().contains("Enter"));
 }

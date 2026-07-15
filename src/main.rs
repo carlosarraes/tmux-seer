@@ -97,8 +97,8 @@ async fn main() -> Result<()> {
         }
         Command::Daemon => tmux_seer::daemon::run().await,
         Command::Popup { client } => {
-            if let Some(key) = tmux_seer::ui::run(client.clone())? {
-                Navigator::new(Tmux::new()).jump(&key, client.as_deref())?;
+            if let Some(target) = tmux_seer::ui::run(client.clone())? {
+                Navigator::new(Tmux::new()).navigate(&target, client.as_deref())?;
             }
             Ok(())
         }

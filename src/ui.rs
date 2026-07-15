@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::{self, Stdout},
     time::{Duration, Instant},
@@ -23,7 +23,8 @@ use ratatui::{
 use crate::{
     daemon::{popup_option_name, runtime_snapshot_path},
     model::AgentState,
-    snapshot::{AgentKey, AggregateSnapshot},
+    navigation::NavigationTarget,
+    snapshot::AggregateSnapshot,
     tmux::{now_ms, Tmux},
 };
 
@@ -42,8 +43,9 @@ pub struct DashboardRow {
     pub depth: u16,
     pub label: String,
     pub state: Option<AgentState>,
-    pub key: Option<AgentKey>,
+    pub target: Option<NavigationTarget>,
     pub offline: bool,
+    fold_target: String,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +55,7 @@ pub struct Dashboard {
     selected: usize,
     filter: String,
     collapsed: HashSet<String>,
+    renamed_sessions: HashMap<(String, String), String>,
 }
 
 impl Dashboard {
@@ -63,6 +66,7 @@ impl Dashboard {
             selected: 0,
             filter: String::new(),
             collapsed: HashSet::new(),
+            renamed_sessions: HashMap::new(),
         };
         dashboard.rebuild(true);
         dashboard
@@ -103,6 +107,65 @@ impl Dashboard {
         &self.filter
     }
 
+    pub fn shortcut_hint(&self) -> &'static str {
+        let Some(row) = self.selected() else {
+            return "q close";
+        };
+        if row.offline {
+            return match row.kind {
+                RowKind::Agent => "↑↓/jk move · Tab fold session · / filter · offline · q close",
+                _ => "↑↓/jk move · Tab fold · / filter · offline · q close",
+            };
+        }
+        match row.kind {
+            RowKind::Host if row.target.is_some() => {
+                "↑↓/jk move · Tab fold · / filter · Enter connect · q close"
+            }
+            RowKind::Host => "↑↓/jk move · Tab fold · / filter · Enter fold · q close",
+            RowKind::Session => {
+                "↑↓/jk move · Tab fold · / filter · Enter jump session · r rename · q close"
+            }
+            RowKind::Window => "↑↓/jk move · Tab fold · / filter · Enter jump window · q close",
+            RowKind::Agent => {
+                "↑↓/jk move · Tab fold session · / filter · Enter jump pane · q close"
+            }
+        }
+    }
+
+    pub fn selected_session(&self) -> Option<(String, String, String)> {
+        let row = self.selected()?;
+        let NavigationTarget::Session { host, session_id } = row.target.as_ref()? else {
+            return None;
+        };
+        Some((host.clone(), session_id.clone(), row.label.clone()))
+    }
+
+    pub fn update_session_name(&mut self, host: &str, session_id: &str, name: &str) {
+        let selected_id = self.selected().map(|row| row.id.clone());
+        self.renamed_sessions
+            .insert((host.to_owned(), session_id.to_owned()), name.to_owned());
+        if let Some(session) = self
+            .snapshot
+            .hosts
+            .iter_mut()
+            .find(|snapshot| snapshot.host == host)
+            .and_then(|snapshot| {
+                snapshot
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+            })
+        {
+            session.name = name.to_owned();
+        }
+        self.rebuild(false);
+        if let Some(id) = selected_id {
+            if let Some(index) = self.rows.iter().position(|row| row.id == id) {
+                self.selected = index;
+            }
+        }
+    }
+
     pub fn move_selection(&mut self, delta: isize) {
         if self.rows.is_empty() {
             return;
@@ -115,18 +178,34 @@ impl Dashboard {
 
     pub fn toggle_selected(&mut self) {
         let Some(row) = self.selected() else { return };
-        if row.kind == RowKind::Agent {
-            return;
-        }
-        let id = row.id.clone();
+        let id = row.fold_target.clone();
         if !self.collapsed.remove(&id) {
-            self.collapsed.insert(id);
+            self.collapsed.insert(id.clone());
         }
         self.rebuild(false);
+        if let Some(index) = self.rows.iter().position(|row| row.id == id) {
+            self.selected = index;
+        }
     }
 
-    pub fn replace_snapshot(&mut self, snapshot: AggregateSnapshot) {
+    pub fn replace_snapshot(&mut self, mut snapshot: AggregateSnapshot) {
         let selected_id = self.selected().map(|row| row.id.clone());
+        let mut confirmed = Vec::new();
+        for host in &mut snapshot.hosts {
+            for session in &mut host.sessions {
+                let key = (host.host.clone(), session.id.clone());
+                if let Some(name) = self.renamed_sessions.get(&key) {
+                    if session.name == *name {
+                        confirmed.push(key);
+                    } else {
+                        session.name.clone_from(name);
+                    }
+                }
+            }
+        }
+        for key in confirmed {
+            self.renamed_sessions.remove(&key);
+        }
         self.snapshot = snapshot;
         self.rebuild(false);
         if let Some(id) = selected_id {
@@ -175,8 +254,13 @@ impl Dashboard {
                             depth: 2,
                             label: format!("{}:{}", window.index, window.name),
                             state: None,
-                            key: None,
+                            target: host.online.then(|| NavigationTarget::Window {
+                                host: host.host.clone(),
+                                session_id: session.id.clone(),
+                                window_id: window.id.clone(),
+                            }),
                             offline: !host.online,
+                            fold_target: window_id.clone(),
                         });
                     }
                     if !show_window || !self.collapsed.contains(&window_id) {
@@ -201,8 +285,11 @@ impl Dashboard {
                                     elapsed(self.snapshot.generated_at_ms, pane.state_since_ms)
                                 ),
                                 state: Some(pane.state),
-                                key: host.online.then(|| pane.key.clone()),
+                                target: host
+                                    .online
+                                    .then(|| NavigationTarget::Agent(pane.key.clone())),
                                 offline: !host.online,
+                                fold_target: format!("s:{}:{}", host.host, session.id),
                             });
                         }
                     }
@@ -217,8 +304,12 @@ impl Dashboard {
                     depth: 1,
                     label: session.name.clone(),
                     state: None,
-                    key: None,
+                    target: host.online.then(|| NavigationTarget::Session {
+                        host: host.host.clone(),
+                        session_id: session.id.clone(),
+                    }),
                     offline: !host.online,
+                    fold_target: session_id.clone(),
                 });
                 if !self.collapsed.contains(&session_id) {
                     host_rows.extend(session_rows);
@@ -241,8 +332,11 @@ impl Dashboard {
                     format!("{}  offline", host.host)
                 },
                 state: (!host.online).then_some(AgentState::Untracked),
-                key: None,
+                target: (host.online && host.host != "local").then(|| NavigationTarget::Host {
+                    host: host.host.clone(),
+                }),
                 offline: !host.online,
+                fold_target: host_id.clone(),
             });
             if !self.collapsed.contains(&host_id) {
                 rows.extend(host_rows);
@@ -269,13 +363,13 @@ impl Dashboard {
     }
 }
 
-pub fn run(client: Option<String>) -> Result<Option<AgentKey>> {
+pub fn run(client: Option<String>) -> Result<Option<NavigationTarget>> {
     let snapshot = load_snapshot()?;
     let mut dashboard = Dashboard::new(snapshot);
     let tmux = Tmux::new();
     let mut popup_guard = client.map(|client| PopupGuard::new(tmux.clone(), client));
     let mut terminal = open_terminal()?;
-    let result = dashboard_loop(&mut terminal, &mut dashboard, &mut popup_guard);
+    let result = dashboard_loop(&mut terminal, &mut dashboard, &mut popup_guard, &tmux);
     let cleanup = close_terminal(&mut terminal);
     match (result, cleanup) {
         (Err(error), _) => Err(error),
@@ -288,63 +382,120 @@ fn dashboard_loop(
     terminal: &mut Tui,
     dashboard: &mut Dashboard,
     popup_guard: &mut Option<PopupGuard>,
-) -> Result<Option<AgentKey>> {
+    tmux: &Tmux,
+) -> Result<Option<NavigationTarget>> {
     let mut filter_mode = false;
+    let mut rename_editor = None;
+    let mut status_message = None;
     let mut last_reload = Instant::now();
 
-    let selected = loop {
-        if let Some(guard) = popup_guard.as_mut() {
-            guard.heartbeat();
-        }
-        terminal.draw(|frame| render(frame, dashboard, filter_mode))?;
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                if filter_mode {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Enter => filter_mode = false,
-                        KeyCode::Backspace => {
-                            let mut filter = dashboard.filter().to_owned();
-                            filter.pop();
-                            dashboard.set_filter(filter);
+    let selected =
+        loop {
+            if let Some(guard) = popup_guard.as_mut() {
+                guard.heartbeat();
+            }
+            terminal.draw(|frame| {
+                render(
+                    frame,
+                    dashboard,
+                    filter_mode,
+                    rename_editor.as_ref(),
+                    status_message.as_deref(),
+                )
+            })?;
+            if event::poll(Duration::from_millis(200))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    status_message = None;
+                    if let Some(editor) = rename_editor.as_mut() {
+                        match key.code {
+                            KeyCode::Esc => rename_editor = None,
+                            KeyCode::Enter if editor.name.trim().is_empty() => {
+                                status_message = Some("Session name cannot be empty".to_owned());
+                            }
+                            KeyCode::Enter => {
+                                match crate::navigation::Navigator::new(tmux.clone())
+                                    .rename_session(&editor.host, &editor.session_id, &editor.name)
+                                {
+                                    Ok(()) => {
+                                        dashboard.update_session_name(
+                                            &editor.host,
+                                            &editor.session_id,
+                                            &editor.name,
+                                        );
+                                        status_message =
+                                            Some(format!("Renamed session to {}", editor.name));
+                                        rename_editor = None;
+                                    }
+                                    Err(error) => status_message = Some(error.to_string()),
+                                }
+                            }
+                            KeyCode::Backspace => editor.backspace(),
+                            KeyCode::Char(character) => editor.push(character),
+                            _ => {}
                         }
-                        KeyCode::Char(character) => {
-                            let mut filter = dashboard.filter().to_owned();
-                            filter.push(character);
-                            dashboard.set_filter(filter);
+                        continue;
+                    }
+                    if filter_mode {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Enter => filter_mode = false,
+                            KeyCode::Backspace => {
+                                let mut filter = dashboard.filter().to_owned();
+                                filter.pop();
+                                dashboard.set_filter(filter);
+                            }
+                            KeyCode::Char(character) => {
+                                let mut filter = dashboard.filter().to_owned();
+                                filter.push(character);
+                                dashboard.set_filter(filter);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break None,
+                        KeyCode::Up | KeyCode::Char('k') => dashboard.move_selection(-1),
+                        KeyCode::Down | KeyCode::Char('j') => dashboard.move_selection(1),
+                        KeyCode::Tab => dashboard.toggle_selected(),
+                        KeyCode::Char('/') => filter_mode = true,
+                        KeyCode::Char('r') => {
+                            if let Some((host, session_id, name)) = dashboard.selected_session() {
+                                rename_editor = Some(RenameEditor::new(host, session_id, name));
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(target) =
+                                dashboard.selected().and_then(|row| row.target.clone())
+                            {
+                                break Some(target);
+                            } else {
+                                dashboard.toggle_selected();
+                            }
                         }
                         _ => {}
                     }
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break None,
-                    KeyCode::Up | KeyCode::Char('k') => dashboard.move_selection(-1),
-                    KeyCode::Down | KeyCode::Char('j') => dashboard.move_selection(1),
-                    KeyCode::Tab => dashboard.toggle_selected(),
-                    KeyCode::Char('/') => filter_mode = true,
-                    KeyCode::Enter => {
-                        if let Some(key) = dashboard.selected().and_then(|row| row.key.clone()) {
-                            break Some(key);
-                        }
-                    }
-                    _ => {}
                 }
             }
-        }
-        if last_reload.elapsed() >= Duration::from_millis(500) {
-            if let Ok(snapshot) = load_snapshot() {
-                dashboard.replace_snapshot(snapshot);
+            if last_reload.elapsed() >= Duration::from_millis(500) {
+                if let Ok(snapshot) = load_snapshot() {
+                    dashboard.replace_snapshot(snapshot);
+                }
+                last_reload = Instant::now();
             }
-            last_reload = Instant::now();
-        }
-    };
+        };
     Ok(selected)
 }
 
-fn render(frame: &mut ratatui::Frame<'_>, dashboard: &Dashboard, filter_mode: bool) {
+fn render(
+    frame: &mut ratatui::Frame<'_>,
+    dashboard: &Dashboard,
+    filter_mode: bool,
+    rename_editor: Option<&RenameEditor>,
+    status_message: Option<&str>,
+) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
@@ -389,10 +540,14 @@ fn render(frame: &mut ratatui::Frame<'_>, dashboard: &Dashboard, filter_mode: bo
     let mut state = ListState::default()
         .with_selected((!dashboard.rows.is_empty()).then_some(dashboard.selected));
     frame.render_stateful_widget(list, body, &mut state);
-    let footer_text = if filter_mode {
+    let footer_text = if let Some(editor) = rename_editor {
+        format!("Rename session: {}_ · Enter save · Esc cancel", editor.name)
+    } else if filter_mode {
         format!("/{}", dashboard.filter)
+    } else if let Some(message) = status_message {
+        message.to_owned()
     } else {
-        "↑↓/jk move · Tab fold · / filter · Enter jump · q close".into()
+        dashboard.shortcut_hint().into()
     };
     frame.render_widget(
         Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray)),
@@ -412,6 +567,31 @@ fn load_snapshot() -> Result<AggregateSnapshot> {
 }
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+#[derive(Debug, Clone)]
+struct RenameEditor {
+    host: String,
+    session_id: String,
+    name: String,
+}
+
+impl RenameEditor {
+    fn new(host: String, session_id: String, name: String) -> Self {
+        Self {
+            host,
+            session_id,
+            name,
+        }
+    }
+
+    fn push(&mut self, character: char) {
+        self.name.push(character);
+    }
+
+    fn backspace(&mut self) {
+        self.name.pop();
+    }
+}
 
 fn open_terminal() -> Result<Tui> {
     enable_raw_mode()?;
@@ -463,5 +643,22 @@ fn elapsed(now: u64, since: u64) -> String {
         format!("{}m", seconds / 60)
     } else {
         format!("{}h", seconds / 3_600)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_editor_keeps_target_identity_while_editing_the_name() {
+        let mut editor = RenameEditor::new("mac".into(), "$2".into(), "review".into());
+
+        editor.push('s');
+        editor.backspace();
+
+        assert_eq!(editor.host, "mac");
+        assert_eq!(editor.session_id, "$2");
+        assert_eq!(editor.name, "review");
     }
 }
