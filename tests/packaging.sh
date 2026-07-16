@@ -129,7 +129,9 @@ cat >"$temporary/plugin/bin/tmux-seer" <<'CURRENT_PLUGIN_BINARY'
 if test "${1:-}" = '--version'; then echo 'tmux-seer CURRENT_VERSION'; exit 0; fi
 printf '%s\n' "$*" >> "$TMUX_SEER_BINARY_LOG"
 CURRENT_PLUGIN_BINARY
-sed -i "s/CURRENT_VERSION/$expected_version/" "$temporary/plugin/bin/tmux-seer"
+sed "s/CURRENT_VERSION/$expected_version/" \
+  "$temporary/plugin/bin/tmux-seer" >"$temporary/plugin/bin/tmux-seer.versioned"
+mv "$temporary/plugin/bin/tmux-seer.versioned" "$temporary/plugin/bin/tmux-seer"
 chmod +x "$temporary/plugin/bin/tmux-seer"
 : >"$temporary/tmux.log"
 : >"$temporary/binary.log"
