@@ -152,19 +152,19 @@ fn remote_shortcut_hints_explain_how_to_return() {
     let mut dashboard = dashboard_with(&[AgentState::Working]);
     assert_eq!(
         dashboard.shortcut_hint(),
-        "↑↓/jk · Tab fold session · / filter · Enter attach · Prefix+d return"
+        "j/k move · h/l host · Tab fold · / filter · Enter attach · Prefix+d return"
     );
 
     dashboard.move_selection(-1);
     assert_eq!(
         dashboard.shortcut_hint(),
-        "↑↓/jk · Tab fold · / filter · Enter attach · r rename · Prefix+d return"
+        "j/k move · h/l host · Tab fold · Enter attach · r rename · Prefix+d return"
     );
 
     dashboard.move_selection(-1);
     assert_eq!(
         dashboard.shortcut_hint(),
-        "↑↓/jk · Tab fold · / filter · Enter connect · Prefix+d return"
+        "j/k move · h/l host · Tab fold · / filter · Enter connect · Prefix+d return"
     );
 }
 
@@ -180,12 +180,12 @@ fn local_shortcut_hints_keep_jump_wording() {
 
     assert_eq!(
         dashboard.shortcut_hint(),
-        "↑↓/jk move · Tab fold session · / filter · Enter jump pane · q close"
+        "j/k move · h/l host · Tab fold · / filter · Enter jump · q close"
     );
     dashboard.move_selection(-1);
     assert_eq!(
         dashboard.shortcut_hint(),
-        "↑↓/jk move · Tab fold · / filter · Enter jump session · r rename · q close"
+        "j/k move · h/l host · Tab fold · Enter jump · r rename · q close"
     );
 }
 
@@ -219,4 +219,58 @@ fn offline_rows_do_not_advertise_navigation() {
 
     assert_eq!(dashboard.selected().unwrap().kind, RowKind::Agent);
     assert!(!dashboard.shortcut_hint().contains("Enter"));
+}
+
+#[test]
+fn host_cycling_wraps_and_skips_offline_hosts() {
+    let mut local = HostSnapshot::empty("local", 1);
+    local.push_test_agent(AgentState::NeedsInput);
+    let mac = HostSnapshot::empty("mac", 1);
+    let mut offline = HostSnapshot::empty("offline", 1);
+    offline.push_test_agent(AgentState::NeedsInput);
+    offline.online = false;
+    let mut zapsign = HostSnapshot::empty("zapsign", 1);
+    zapsign.push_test_agent(AgentState::Working);
+    let mut dashboard = Dashboard::new(AggregateSnapshot {
+        schema_version: SCHEMA_VERSION,
+        generated_at_ms: 10,
+        hosts: vec![local, mac, offline, zapsign],
+    });
+
+    dashboard.cycle_host(1);
+    assert_eq!(dashboard.selected().unwrap().label, "mac");
+    dashboard.cycle_host(1);
+    assert_selected_agent(&dashboard, "zapsign", AgentState::Working);
+    dashboard.cycle_host(1);
+    assert_selected_agent(&dashboard, "local", AgentState::NeedsInput);
+    dashboard.cycle_host(-1);
+    assert_selected_agent(&dashboard, "zapsign", AgentState::Working);
+}
+
+#[test]
+fn host_cycling_lands_on_the_highest_priority_visible_agent() {
+    let mut local = HostSnapshot::empty("local", 1);
+    local.push_test_agent(AgentState::NeedsInput);
+    let mut mac = HostSnapshot::empty("mac", 1);
+    mac.push_test_agent(AgentState::Working);
+    mac.push_test_agent(AgentState::Idle);
+    mac.push_test_agent(AgentState::NeedsInput);
+    let mut dashboard = Dashboard::new(AggregateSnapshot {
+        schema_version: SCHEMA_VERSION,
+        generated_at_ms: 10,
+        hosts: vec![local, mac],
+    });
+
+    dashboard.cycle_host(1);
+
+    assert_selected_agent(&dashboard, "mac", AgentState::NeedsInput);
+}
+
+fn assert_selected_agent(dashboard: &Dashboard, host: &str, state: AgentState) {
+    let selected = dashboard.selected().unwrap();
+    assert_eq!(selected.state, Some(state));
+    assert!(matches!(
+        selected.target.as_ref(),
+        Some(NavigationTarget::Agent(key)) if key.host == host
+    ));
 }

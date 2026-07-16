@@ -11,7 +11,7 @@ Seer is a tmux dashboard for seeing which coding agents are working, idle, or wa
 - Blue — needs structured permission or question input
 - Gray — agent detected without usable lifecycle state, or a remote host is offline
 
-`prefix + S` opens the top-right **Seer** dashboard. It groups agent panes by host, session, and window; windows and panes without a running agent are omitted. Enter jumps to local targets and turns the existing popup into an interactive SSH/tmux view for remote targets.
+`prefix + S` opens the top-right **Seer** dashboard. `prefix + s` replaces tmux's default session tree with a borderless full-screen Seer view. Both group agent panes by host, session, and window; windows and panes without a running agent are omitted. Enter jumps to local targets and turns the current Seer view into an interactive SSH/tmux view for remote targets.
 
 Seer intentionally does not infer blue from conversational prose and does not send input, stop, or restart agents.
 
@@ -87,7 +87,8 @@ The setup picker detects Claude, Codex, and Pi on each host. After you choose in
 
 | tmux option | Default | Purpose |
 |---|---:|---|
-| `@seer_key` | `S` | Prefix binding for the dashboard |
+| `@seer_key` | `S` | Prefix binding for the quick dashboard |
+| `@seer_fullscreen_key` | `s` | Prefix binding for the full-screen dashboard |
 | `@seer_hosts` | empty | Space-separated SSH aliases |
 | `@seer_popup_width` | `76` | Popup columns |
 | `@seer_popup_height` | `70%` | Popup height |
@@ -102,6 +103,7 @@ Status-square colors default to `#9ece6a`, `#e0af68`, `#7aa2f7`, and `#565f89` t
 | Key | Action |
 |---|---|
 | `↑` / `↓`, `j` / `k` | Move |
+| `h` / `l` | Jump to the previous or next online host, wrapping at the ends |
 | `Tab` | Fold or expand the selected group; from an agent, fold its session |
 | `/` | Filter |
 | `Enter` | Connect to a remote host or jump to the selected session, window, or agent pane |

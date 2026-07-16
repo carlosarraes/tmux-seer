@@ -15,6 +15,7 @@ pub fn with_status_widget(status_right: &str) -> String {
 
 pub fn bootstrap(tmux: Tmux, binary: &str) -> Result<()> {
     ensure_option(&tmux, "@seer_key", "S")?;
+    ensure_option(&tmux, "@seer_fullscreen_key", "s")?;
     ensure_option(&tmux, "@seer_hosts", "")?;
     ensure_option(&tmux, "@seer_popup_width", "76")?;
     ensure_option(&tmux, "@seer_popup_height", "70%")?;
@@ -35,6 +36,9 @@ pub fn bootstrap(tmux: Tmux, binary: &str) -> Result<()> {
     let key = tmux
         .show_global_option("@seer_key")
         .unwrap_or_else(|| "S".into());
+    let fullscreen_key = tmux
+        .show_global_option("@seer_fullscreen_key")
+        .unwrap_or_else(|| "s".into());
     let width = tmux
         .show_global_option("@seer_popup_width")
         .unwrap_or_else(|| "76".into());
@@ -49,6 +53,19 @@ pub fn bootstrap(tmux: Tmux, binary: &str) -> Result<()> {
         tmux_quote(&popup_command),
     );
     tmux.output(["bind-key", &key, "run-shell", "-C", &display_command])?;
+    let fullscreen_command = format!(
+        "display-popup -B -EE -T Seer -w {} -h {} {}",
+        tmux_quote("100%"),
+        tmux_quote("100%"),
+        tmux_quote(&popup_command),
+    );
+    tmux.output([
+        "bind-key",
+        &fullscreen_key,
+        "run-shell",
+        "-C",
+        &fullscreen_command,
+    ])?;
     tmux.output([
         "run-shell",
         "-b",

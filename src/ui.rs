@@ -25,6 +25,13 @@ use crate::{
     popup::PopupLease, snapshot::AggregateSnapshot, tmux::Tmux,
 };
 
+const STATE_PRIORITY: [AgentState; 4] = [
+    AgentState::NeedsInput,
+    AgentState::Idle,
+    AgentState::Working,
+    AgentState::Untracked,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     Host,
@@ -42,6 +49,7 @@ pub struct DashboardRow {
     pub state: Option<AgentState>,
     pub target: Option<NavigationTarget>,
     pub offline: bool,
+    host: String,
     fold_target: String,
 }
 
@@ -109,34 +117,29 @@ impl Dashboard {
             return "q close";
         };
         if row.offline {
-            return match row.kind {
-                RowKind::Agent => "↑↓/jk move · Tab fold session · / filter · offline · q close",
-                _ => "↑↓/jk move · Tab fold · / filter · offline · q close",
-            };
+            return "j/k move · h/l host · Tab fold · / filter · offline · q close";
         }
         if is_remote_target(row.target.as_ref()) {
             return match row.kind {
-                RowKind::Host => "↑↓/jk · Tab fold · / filter · Enter connect · Prefix+d return",
-                RowKind::Session => {
-                    "↑↓/jk · Tab fold · / filter · Enter attach · r rename · Prefix+d return"
+                RowKind::Host => {
+                    "j/k move · h/l host · Tab fold · / filter · Enter connect · Prefix+d return"
                 }
-                RowKind::Window => "↑↓/jk · Tab fold · / filter · Enter attach · Prefix+d return",
-                RowKind::Agent => {
-                    "↑↓/jk · Tab fold session · / filter · Enter attach · Prefix+d return"
+                RowKind::Session => {
+                    "j/k move · h/l host · Tab fold · Enter attach · r rename · Prefix+d return"
+                }
+                RowKind::Window | RowKind::Agent => {
+                    "j/k move · h/l host · Tab fold · / filter · Enter attach · Prefix+d return"
                 }
             };
         }
         match row.kind {
             RowKind::Host if row.target.is_some() => {
-                "↑↓/jk move · Tab fold · / filter · Enter connect · q close"
+                "j/k move · h/l host · Tab fold · / filter · Enter connect · q close"
             }
-            RowKind::Host => "↑↓/jk move · Tab fold · / filter · Enter fold · q close",
-            RowKind::Session => {
-                "↑↓/jk move · Tab fold · / filter · Enter jump session · r rename · q close"
-            }
-            RowKind::Window => "↑↓/jk move · Tab fold · / filter · Enter jump window · q close",
-            RowKind::Agent => {
-                "↑↓/jk move · Tab fold session · / filter · Enter jump pane · q close"
+            RowKind::Host => "j/k move · h/l host · Tab fold · / filter · Enter fold · q close",
+            RowKind::Session => "j/k move · h/l host · Tab fold · Enter jump · r rename · q close",
+            RowKind::Window | RowKind::Agent => {
+                "j/k move · h/l host · Tab fold · / filter · Enter jump · q close"
             }
         }
     }
@@ -183,6 +186,38 @@ impl Dashboard {
             .selected
             .saturating_add_signed(delta)
             .min(self.rows.len() - 1);
+    }
+
+    pub fn cycle_host(&mut self, direction: isize) {
+        if direction == 0 {
+            return;
+        }
+        let hosts = self
+            .rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Host && !row.offline)
+            .map(|row| row.host.as_str())
+            .collect::<Vec<_>>();
+        if hosts.is_empty() {
+            return;
+        }
+        let current = self.selected().map(|row| row.host.as_str());
+        let current_index = current.and_then(|host| hosts.iter().position(|item| *item == host));
+        let base = current_index.unwrap_or(if direction > 0 { hosts.len() - 1 } else { 0 });
+        let next = (base as isize + direction.signum()).rem_euclid(hosts.len() as isize) as usize;
+        let host = hosts[next].to_owned();
+        let preferred = STATE_PRIORITY.into_iter().find_map(|state| {
+            self.rows.iter().position(|row| {
+                row.host == host && row.kind == RowKind::Agent && row.state == Some(state)
+            })
+        });
+        if let Some(index) = preferred.or_else(|| {
+            self.rows
+                .iter()
+                .position(|row| row.host == host && row.kind == RowKind::Host)
+        }) {
+            self.selected = index;
+        }
     }
 
     pub fn toggle_selected(&mut self) {
@@ -269,6 +304,7 @@ impl Dashboard {
                                 window_id: window.id.clone(),
                             }),
                             offline: !host.online,
+                            host: host.host.clone(),
                             fold_target: window_id.clone(),
                         });
                     }
@@ -298,6 +334,7 @@ impl Dashboard {
                                     .online
                                     .then(|| NavigationTarget::Agent(pane.key.clone())),
                                 offline: !host.online,
+                                host: host.host.clone(),
                                 fold_target: format!("s:{}:{}", host.host, session.id),
                             });
                         }
@@ -318,6 +355,7 @@ impl Dashboard {
                         session_id: session.id.clone(),
                     }),
                     offline: !host.online,
+                    host: host.host.clone(),
                     fold_target: session_id.clone(),
                 });
                 if !self.collapsed.contains(&session_id) {
@@ -345,6 +383,7 @@ impl Dashboard {
                     host: host.host.clone(),
                 }),
                 offline: !host.online,
+                host: host.host.clone(),
                 fold_target: host_id.clone(),
             });
             if !self.collapsed.contains(&host_id) {
@@ -353,19 +392,14 @@ impl Dashboard {
         }
         self.rows = rows;
         self.selected = if select_by_priority {
-            [
-                AgentState::NeedsInput,
-                AgentState::Idle,
-                AgentState::Working,
-                AgentState::Untracked,
-            ]
-            .into_iter()
-            .find_map(|state| {
-                self.rows
-                    .iter()
-                    .position(|row| !row.offline && row.state == Some(state))
-            })
-            .unwrap_or(0)
+            STATE_PRIORITY
+                .into_iter()
+                .find_map(|state| {
+                    self.rows
+                        .iter()
+                        .position(|row| !row.offline && row.state == Some(state))
+                })
+                .unwrap_or(0)
         } else {
             self.selected.min(self.rows.len().saturating_sub(1))
         };
@@ -541,6 +575,14 @@ fn handle_key(
         }
         KeyCode::Down | KeyCode::Char('j') => {
             dashboard.move_selection(1);
+            DashboardAction::Continue
+        }
+        KeyCode::Char('h') => {
+            dashboard.cycle_host(-1);
+            DashboardAction::Continue
+        }
+        KeyCode::Char('l') => {
+            dashboard.cycle_host(1);
             DashboardAction::Continue
         }
         KeyCode::Tab => {
@@ -736,6 +778,88 @@ mod tests {
 
         assert_eq!(action, DashboardAction::Continue);
         assert_eq!(dashboard.selected().unwrap().kind, RowKind::Host);
+    }
+
+    #[test]
+    fn horizontal_keys_cycle_hosts() {
+        let mut local = crate::snapshot::HostSnapshot::empty("local", 1);
+        local.push_test_agent(AgentState::NeedsInput);
+        let mut mac = crate::snapshot::HostSnapshot::empty("mac", 1);
+        mac.push_test_agent(AgentState::Idle);
+        let mut dashboard = Dashboard::new(AggregateSnapshot {
+            schema_version: crate::snapshot::SCHEMA_VERSION,
+            generated_at_ms: 1,
+            hosts: vec![local, mac],
+        });
+        let mut filter_mode = false;
+        let mut rename_editor = None;
+        let mut status_message = None;
+
+        let action = handle_events(
+            [Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('l'),
+                crossterm::event::KeyModifiers::NONE,
+            ))],
+            &mut dashboard,
+            &mut filter_mode,
+            &mut rename_editor,
+            &mut status_message,
+            &Tmux::new(),
+        );
+
+        assert_eq!(action, DashboardAction::Continue);
+        assert!(matches!(
+            dashboard.selected().and_then(|row| row.target.as_ref()),
+            Some(NavigationTarget::Agent(key)) if key.host == "mac"
+        ));
+    }
+
+    #[test]
+    fn horizontal_keys_remain_text_while_filtering_or_renaming() {
+        let mut host = crate::snapshot::HostSnapshot::empty("local", 1);
+        host.push_test_agent(AgentState::Idle);
+        let snapshot = AggregateSnapshot {
+            schema_version: crate::snapshot::SCHEMA_VERSION,
+            generated_at_ms: 1,
+            hosts: vec![host],
+        };
+        let tmux = Tmux::new();
+        let mut dashboard = Dashboard::new(snapshot);
+        let mut filter_mode = true;
+        let mut rename_editor = None;
+        let mut status_message = None;
+
+        handle_events(
+            [Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('l'),
+                crossterm::event::KeyModifiers::NONE,
+            ))],
+            &mut dashboard,
+            &mut filter_mode,
+            &mut rename_editor,
+            &mut status_message,
+            &tmux,
+        );
+        assert_eq!(dashboard.filter(), "l");
+
+        filter_mode = false;
+        rename_editor = Some(RenameEditor::new(
+            "local".into(),
+            "$1".into(),
+            String::new(),
+        ));
+        handle_events(
+            [Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('h'),
+                crossterm::event::KeyModifiers::NONE,
+            ))],
+            &mut dashboard,
+            &mut filter_mode,
+            &mut rename_editor,
+            &mut status_message,
+            &tmux,
+        );
+        assert_eq!(rename_editor.unwrap().name, "h");
     }
 
     #[test]
