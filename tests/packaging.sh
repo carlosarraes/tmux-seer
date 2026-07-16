@@ -3,6 +3,7 @@
 set -eu
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+expected_version="$(awk -F '"' '$1 ~ /^version = / { print $2; exit }' "$root/Cargo.toml")"
 
 fail() {
   echo "packaging test failed: $*" >&2
@@ -84,5 +85,60 @@ PATH="$temporary/bin:$PATH" \
 
 test -x "$destination" || fail "installer did not install an executable"
 test "$("$destination")" = "fixture seer" || fail "installed the wrong binary"
+
+mkdir -p "$temporary/plugin/bin"
+cp "$root/tmux-seer.tmux" "$root/Cargo.toml" "$temporary/plugin/"
+cat >"$temporary/bin/tmux" <<'TMUX'
+#!/usr/bin/env sh
+set -eu
+printf '%s\n' "$*" >> "$TMUX_SEER_TMUX_LOG"
+case "$1" in
+  show-option) exit 0 ;;
+esac
+TMUX
+chmod +x "$temporary/bin/tmux"
+
+cat >"$temporary/bin/tmux-seer" <<'STALE_PATH_BINARY'
+#!/usr/bin/env sh
+printf '%s\n' path-binary >> "$TMUX_SEER_BINARY_LOG"
+echo 'tmux-seer 0.0.6'
+STALE_PATH_BINARY
+chmod +x "$temporary/bin/tmux-seer"
+
+cat >"$temporary/plugin/bin/tmux-seer" <<'STALE_PLUGIN_BINARY'
+#!/usr/bin/env sh
+if test "${1:-}" = '--version'; then echo 'tmux-seer 0.0.6'; exit 0; fi
+printf '%s\n' stale-plugin-bootstrap >> "$TMUX_SEER_BINARY_LOG"
+STALE_PLUGIN_BINARY
+chmod +x "$temporary/plugin/bin/tmux-seer"
+
+: >"$temporary/tmux.log"
+: >"$temporary/binary.log"
+PATH="$temporary/bin:$PATH" \
+  TMUX_SEER_TMUX_LOG="$temporary/tmux.log" \
+  TMUX_SEER_BINARY_LOG="$temporary/binary.log" \
+  bash "$temporary/plugin/tmux-seer.tmux"
+
+grep -Fq "TMUX_SEER_VERSION='v$expected_version'" "$temporary/tmux.log" ||
+  fail "stale plugin binary did not schedule its matching release"
+test ! -s "$temporary/binary.log" ||
+  fail "a stale plugin or PATH binary was bootstrapped"
+
+cat >"$temporary/plugin/bin/tmux-seer" <<'CURRENT_PLUGIN_BINARY'
+#!/usr/bin/env sh
+if test "${1:-}" = '--version'; then echo 'tmux-seer CURRENT_VERSION'; exit 0; fi
+printf '%s\n' "$*" >> "$TMUX_SEER_BINARY_LOG"
+CURRENT_PLUGIN_BINARY
+sed -i "s/CURRENT_VERSION/$expected_version/" "$temporary/plugin/bin/tmux-seer"
+chmod +x "$temporary/plugin/bin/tmux-seer"
+: >"$temporary/tmux.log"
+: >"$temporary/binary.log"
+PATH="$temporary/bin:$PATH" \
+  TMUX_SEER_TMUX_LOG="$temporary/tmux.log" \
+  TMUX_SEER_BINARY_LOG="$temporary/binary.log" \
+  bash "$temporary/plugin/tmux-seer.tmux"
+
+test "$(cat "$temporary/binary.log")" = 'bootstrap' ||
+  fail "the current plugin-owned binary was not bootstrapped"
 
 echo "packaging checks passed"
