@@ -124,7 +124,7 @@ pub async fn run() -> Result<()> {
         None => return Ok(()),
     };
     let tmux = Tmux::new();
-    let hosts = option(&tmux, "@seer_hosts", "")
+    let mut hosts = option(&tmux, "@seer_hosts", "")
         .split_whitespace()
         .map(str::to_owned)
         .collect::<Vec<_>>();
@@ -153,6 +153,15 @@ pub async fn run() -> Result<()> {
 
     loop {
         let now = now_ms();
+        if reconcile_hosts(
+            &option(&tmux, "@seer_hosts", ""),
+            &mut hosts,
+            &mut trackers,
+            &mut previous,
+            &mut previous_online,
+        ) {
+            last_remote = 0;
+        }
         match tmux.snapshot("local") {
             Ok(snapshot) => trackers.get_mut("local").unwrap().success(snapshot),
             Err(error) => trackers
@@ -224,6 +233,34 @@ pub async fn run() -> Result<()> {
             }
         }
     }
+}
+
+fn reconcile_hosts(
+    configured: &str,
+    hosts: &mut Vec<String>,
+    trackers: &mut HashMap<String, HostTracker>,
+    previous: &mut HashMap<AgentKey, AgentState>,
+    previous_online: &mut HashMap<String, bool>,
+) -> bool {
+    let next = configured
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if *hosts == next {
+        return false;
+    }
+
+    let retained = next.iter().map(String::as_str).collect::<HashSet<_>>();
+    trackers.retain(|host, _| host == "local" || retained.contains(host.as_str()));
+    previous.retain(|key, _| key.host == "local" || retained.contains(key.host.as_str()));
+    previous_online.retain(|host, _| host == "local" || retained.contains(host.as_str()));
+    for host in &next {
+        trackers
+            .entry(host.clone())
+            .or_insert_with(|| HostTracker::new(host));
+    }
+    *hosts = next;
+    true
 }
 
 async fn collect_remotes(hosts: &[String], trackers: &mut HashMap<String, HostTracker>, now: u64) {
@@ -366,6 +403,60 @@ fn publish_widget_if_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_configuration_changes_reconcile_runtime_state() {
+        let mut hosts = vec!["mac".to_owned(), "old".to_owned()];
+        let mut trackers = HashMap::from([
+            ("local".into(), HostTracker::new("local")),
+            ("mac".into(), HostTracker::new("mac")),
+            ("old".into(), HostTracker::new("old")),
+        ]);
+        let old_key = AgentKey {
+            host: "old".into(),
+            session_id: "$1".into(),
+            window_id: "@1".into(),
+            pane_id: "%1".into(),
+        };
+        let mut previous = HashMap::from([(old_key, AgentState::Working)]);
+        let mut previous_online = HashMap::from([("old".into(), true)]);
+
+        let changed = reconcile_hosts(
+            "mac vps",
+            &mut hosts,
+            &mut trackers,
+            &mut previous,
+            &mut previous_online,
+        );
+
+        assert!(changed);
+        assert_eq!(hosts, ["mac", "vps"]);
+        assert!(trackers.contains_key("local"));
+        assert!(trackers.contains_key("mac"));
+        assert!(trackers.contains_key("vps"));
+        assert!(!trackers.contains_key("old"));
+        assert!(previous.is_empty());
+        assert!(previous_online.is_empty());
+    }
+
+    #[test]
+    fn unchanged_host_configuration_preserves_runtime_state() {
+        let mut hosts = vec!["mac".to_owned()];
+        let mut trackers = HashMap::from([
+            ("local".into(), HostTracker::new("local")),
+            ("mac".into(), HostTracker::new("mac")),
+        ]);
+        let mut previous = HashMap::new();
+        let mut previous_online = HashMap::new();
+
+        assert!(!reconcile_hosts(
+            "mac",
+            &mut hosts,
+            &mut trackers,
+            &mut previous,
+            &mut previous_online,
+        ));
+    }
 
     #[test]
     fn widget_publishes_only_initial_and_changed_values() {
