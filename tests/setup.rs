@@ -114,6 +114,15 @@ fn hook_merge_preserves_unrelated_entries_and_is_idempotent() {
 }
 
 #[test]
+fn codex_setup_installs_subagent_stop_hook() {
+    let merged = merge_hook_json(serde_json::json!({}), Integration::Codex, false).unwrap();
+
+    assert!(merged["hooks"]["SubagentStop"]
+        .to_string()
+        .contains("tmux-seer hook codex SubagentStop"));
+}
+
+#[test]
 fn uninstall_removes_only_owned_hook_groups() {
     let original = serde_json::json!({
         "hooks": {

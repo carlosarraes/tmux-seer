@@ -910,6 +910,7 @@ fn integration_events(integration: Integration) -> &'static [(&'static str, Opti
             ("PreToolUse", None),
             ("PermissionRequest", None),
             ("PostToolUse", None),
+            ("SubagentStop", None),
             ("Stop", None),
         ],
         Integration::Pi => &[],

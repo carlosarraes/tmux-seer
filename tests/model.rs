@@ -67,6 +67,13 @@ fn codex_event(
 }
 
 #[test]
+fn codex_subagent_stop_completes_the_subagent_turn() {
+    let event = codex_event("SubagentStop", "parent", Some("child-turn"));
+
+    assert_eq!(event.kind, EventKind::Stopped);
+}
+
+#[test]
 fn codex_child_stop_keeps_the_parent_working() {
     let mut tracker = CodexPaneTracker::default();
 

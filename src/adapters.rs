@@ -31,7 +31,7 @@ pub fn normalize(native: NativeEvent) -> NormalizedEvent {
         AgentKind::Codex => match event {
             "SessionStart" => EventKind::Started,
             "PermissionRequest" => EventKind::NeedsInput,
-            "Stop" | "StopFailure" => EventKind::Stopped,
+            "Stop" | "StopFailure" | "SubagentStop" => EventKind::Stopped,
             "SessionEnd" => EventKind::Ended,
             _ => EventKind::Activity,
         },
