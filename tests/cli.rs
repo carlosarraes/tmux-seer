@@ -57,6 +57,7 @@ fn repeated_hook_activity_does_not_rewrite_or_refresh_tmux() {
             .env("TMUX_SEER_TMUX", &fake.program)
             .env("TMUX_SEER_TEST_LOG", &fake.log)
             .env("TMUX_SEER_TEST_RECORD", &fake.record)
+            .env("TMUX_SEER_TEST_TRACKER", &fake.tracker)
             .write_stdin(r#"{"session_id":"s1","turn_id":"t1"}"#)
             .assert()
             .success();
@@ -78,6 +79,36 @@ fn repeated_hook_activity_does_not_rewrite_or_refresh_tmux() {
         writes_after_first
     );
     assert!(!log.contains("refresh-client"));
+}
+
+#[test]
+fn codex_child_stop_does_not_idle_the_parent_pane() {
+    let fake = FakeTmux::new();
+    let run_hook = |event: &str, payload: &str| {
+        Command::cargo_bin("tmux-seer")
+            .unwrap()
+            .args(["hook", "codex", event])
+            .env("TMUX_PANE", "%9")
+            .env("TMUX_SEER_TMUX", &fake.program)
+            .env("TMUX_SEER_TEST_LOG", &fake.log)
+            .env("TMUX_SEER_TEST_RECORD", &fake.record)
+            .env("TMUX_SEER_TEST_TRACKER", &fake.tracker)
+            .write_stdin(payload)
+            .assert()
+            .success();
+    };
+
+    run_hook(
+        "UserPromptSubmit",
+        r#"{"session_id":"parent","turn_id":"p1"}"#,
+    );
+    run_hook("PreToolUse", r#"{"session_id":"child","turn_id":"c1"}"#);
+    run_hook("Stop", r#"{"session_id":"child","turn_id":"c1"}"#);
+
+    let record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&fake.record).unwrap()).unwrap();
+    assert_eq!(record["state"], "working");
+    assert_eq!(record["session_id"], "parent");
 }
 
 #[test]
@@ -135,6 +166,7 @@ struct FakeTmux {
     program: std::path::PathBuf,
     log: std::path::PathBuf,
     record: std::path::PathBuf,
+    tracker: std::path::PathBuf,
 }
 
 impl FakeTmux {
@@ -143,22 +175,36 @@ impl FakeTmux {
         let program = directory.path().join("tmux");
         let log = directory.path().join("tmux.log");
         let record = directory.path().join("record.json");
+        let tracker = directory.path().join("tracker.json");
         fs::write(
             &program,
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$TMUX_SEER_TEST_LOG"
 case "$1" in
   show-options)
-    if [ "${6:-}" = "@seer_record" ] && [ -f "${TMUX_SEER_TEST_RECORD:-}" ]; then
-      cat "$TMUX_SEER_TEST_RECORD"
-      exit 0
-    fi
+    case "${6:-}" in
+      @seer_record)
+        test -f "${TMUX_SEER_TEST_RECORD:-}" || exit 1
+        cat "$TMUX_SEER_TEST_RECORD"
+        exit 0
+        ;;
+      @seer_codex_tracker)
+        test -f "${TMUX_SEER_TEST_TRACKER:-}" || exit 1
+        cat "$TMUX_SEER_TEST_TRACKER"
+        exit 0
+        ;;
+    esac
     exit 1
     ;;
   set-option)
-    if [ "${5:-}" = "@seer_record" ] && [ -n "${TMUX_SEER_TEST_RECORD:-}" ]; then
-      printf '%s' "${6:-}" > "$TMUX_SEER_TEST_RECORD"
-    fi
+    case "${5:-}" in
+      @seer_record)
+        test -n "${TMUX_SEER_TEST_RECORD:-}" && printf '%s' "${6:-}" > "$TMUX_SEER_TEST_RECORD"
+        ;;
+      @seer_codex_tracker)
+        test -n "${TMUX_SEER_TEST_TRACKER:-}" && printf '%s' "${6:-}" > "$TMUX_SEER_TEST_TRACKER"
+        ;;
+    esac
     ;;
   list-panes) printf '%s\n' "$TMUX_SEER_ROWS" ;;
 esac
@@ -173,6 +219,7 @@ esac
             program,
             log,
             record,
+            tracker,
         }
     }
 }

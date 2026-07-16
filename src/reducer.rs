@@ -12,6 +12,105 @@ pub struct AgentRecord {
     pub reason: Option<String>,
 }
 
+const MAX_COMPLETED_CODEX_TURNS: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CodexTurnKey {
+    session_id: String,
+    turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CodexTurn {
+    key: CodexTurnKey,
+    record: AgentRecord,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexPaneTracker {
+    active: Vec<CodexTurn>,
+    completed: Vec<CodexTurnKey>,
+    last_idle: Option<AgentRecord>,
+}
+
+impl CodexPaneTracker {
+    pub fn apply(&mut self, event: NormalizedEvent, now_ms: u64) -> Option<AgentRecord> {
+        debug_assert_eq!(event.agent, AgentKind::Codex);
+        let key = CodexTurnKey {
+            session_id: event.session_id.as_deref().unwrap_or("unknown").to_owned(),
+            turn_id: event.turn_id.clone(),
+        };
+
+        match event.kind {
+            EventKind::Started => {
+                self.active.clear();
+                self.completed.clear();
+                self.last_idle = Some(reduce(None, event, now_ms));
+            }
+            EventKind::Ended => {
+                self.active.clear();
+                self.completed.clear();
+                self.last_idle = None;
+            }
+            EventKind::Stopped => {
+                if self.completed.contains(&key) {
+                    return self.aggregate();
+                }
+                if key.turn_id.is_some() {
+                    self.active.retain(|turn| turn.key != key);
+                } else {
+                    self.active
+                        .retain(|turn| turn.key.session_id != key.session_id);
+                }
+                self.remember_completed(key);
+                self.last_idle = Some(reduce(None, event, now_ms));
+            }
+            EventKind::Activity | EventKind::NeedsInput | EventKind::InputResolved => {
+                if self.completed.contains(&key) {
+                    return self.aggregate();
+                }
+                if let Some(turn) = self.active.iter_mut().find(|turn| turn.key == key) {
+                    turn.record = reduce(Some(turn.record.clone()), event, now_ms);
+                } else {
+                    self.active.push(CodexTurn {
+                        key,
+                        record: reduce(None, event, now_ms),
+                    });
+                }
+            }
+        }
+
+        self.aggregate()
+    }
+
+    fn aggregate(&self) -> Option<AgentRecord> {
+        for state in [AgentState::NeedsInput, AgentState::Working] {
+            if let Some(turn) = self
+                .active
+                .iter()
+                .filter(|turn| turn.record.state == state)
+                .min_by_key(|turn| turn.record.state_since_ms)
+            {
+                let mut record = turn.record.clone();
+                record.active_turn = turn.key.turn_id.clone();
+                return Some(record);
+            }
+        }
+        self.last_idle.clone()
+    }
+
+    fn remember_completed(&mut self, key: CodexTurnKey) {
+        self.completed.push(key);
+        let overflow = self
+            .completed
+            .len()
+            .saturating_sub(MAX_COMPLETED_CODEX_TURNS);
+        if overflow > 0 {
+            self.completed.drain(..overflow);
+        }
+    }
+}
+
 impl AgentRecord {
     pub fn new(agent: AgentKind, session_id: impl Into<String>, now_ms: u64) -> Self {
         Self {

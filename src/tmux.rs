@@ -1,16 +1,18 @@
 use std::{
     ffi::OsStr,
+    fs::{self, File, OpenOptions},
     path::PathBuf,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context, Result};
+use fs2::FileExt;
 
 use crate::{
     adapters::{normalize, NativeEvent},
     model::{AgentKind, AgentState, EventKind},
-    reducer::{reduce, AgentRecord},
+    reducer::{reduce, AgentRecord, CodexPaneTracker},
     snapshot::{parse_tmux_rows_with_processes, HostSnapshot, ProcessTable},
 };
 
@@ -22,6 +24,7 @@ pub const PANE_OPTIONS: &[&str] = &[
     "@seer_turn_id",
     "@seer_reason",
     "@seer_record",
+    "@seer_codex_tracker",
 ];
 
 const SNAPSHOT_FORMAT: &str = concat!(
@@ -90,6 +93,10 @@ impl Tmux {
 
     pub fn apply_hook(&self, pane: &str, native: NativeEvent) -> Result<()> {
         let event = normalize(native);
+        if event.agent == AgentKind::Codex {
+            let _lock = acquire_hook_lock(pane)?;
+            return self.apply_codex_hook(pane, event);
+        }
         if event.kind == EventKind::Ended {
             for option in PANE_OPTIONS {
                 let _ = self.unset_pane_option(pane, option);
@@ -101,9 +108,47 @@ impl Tmux {
             .show_pane_option(pane, "@seer_record")
             .and_then(|value| serde_json::from_str::<AgentRecord>(&value).ok());
         let record = reduce(current.clone(), event, now_ms());
-        if current.as_ref() == Some(&record) {
+        self.publish_record(pane, current.as_ref(), &record)
+    }
+
+    fn apply_codex_hook(&self, pane: &str, event: crate::model::NormalizedEvent) -> Result<()> {
+        let current = self
+            .show_pane_option(pane, "@seer_record")
+            .and_then(|value| serde_json::from_str::<AgentRecord>(&value).ok());
+        let mut tracker = self
+            .show_pane_option(pane, "@seer_codex_tracker")
+            .and_then(|value| serde_json::from_str::<CodexPaneTracker>(&value).ok())
+            .unwrap_or_default();
+        let previous_tracker = tracker.clone();
+        let record = tracker.apply(event, now_ms());
+
+        if tracker != previous_tracker {
+            self.set_pane_option(
+                pane,
+                "@seer_codex_tracker",
+                &serde_json::to_string(&tracker)?,
+            )?;
+        }
+
+        let Some(record) = record else {
+            for option in PANE_OPTIONS {
+                let _ = self.unset_pane_option(pane, option);
+            }
+            return Ok(());
+        };
+        self.publish_record(pane, current.as_ref(), &record)
+    }
+
+    fn publish_record(
+        &self,
+        pane: &str,
+        current: Option<&AgentRecord>,
+        record: &AgentRecord,
+    ) -> Result<()> {
+        if current == Some(record) {
             return Ok(());
         }
+
         self.set_pane_option(pane, "@seer_agent_kind", agent_slug(record.agent))?;
         self.set_pane_option(pane, "@seer_state", state_slug(record.state))?;
         self.set_pane_option(
@@ -172,6 +217,33 @@ impl Tmux {
     pub fn refresh_status(&self) {
         let _ = self.output(["refresh-client", "-S"]);
     }
+}
+
+fn acquire_hook_lock(pane: &str) -> Result<File> {
+    let directory = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("tmux-seer")
+        .join("hooks");
+    fs::create_dir_all(&directory)?;
+    let safe_pane = pane
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join(format!("{safe_pane}.lock")))?;
+    FileExt::lock_exclusive(&lock)?;
+    Ok(lock)
 }
 
 pub fn now_ms() -> u64 {
