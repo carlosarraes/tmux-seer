@@ -1,5 +1,5 @@
 use tmux_seer::daemon::{
-    format_notification, notification_for_transition, remote_snapshot_args, HostTracker,
+    classify_local_paths, format_notification, notification_for_transition, HostTracker, LocalWake,
 };
 use tmux_seer::model::AgentState;
 use tmux_seer::snapshot::HostSnapshot;
@@ -43,12 +43,19 @@ fn remote_goes_offline_after_two_failures_and_retains_tree() {
 }
 
 #[test]
-fn remote_snapshot_uses_batch_mode_login_shell_and_known_binary_path() {
-    let args = remote_snapshot_args("mac").unwrap();
-    assert!(args.iter().any(|arg| arg == "BatchMode=yes"));
-    assert!(args.iter().any(|arg| arg == "mac"));
-    assert!(args.last().unwrap().contains("$HOME/.local/bin/tmux-seer"));
-    assert!(remote_snapshot_args("bad host").is_err());
+fn local_file_changes_select_the_cheapest_refresh() {
+    assert_eq!(
+        classify_local_paths(&["/tmp/server/snapshot.json".into()]),
+        LocalWake::Ignore
+    );
+    assert_eq!(
+        classify_local_paths(&["/tmp/server/panes/_4.json".into()]),
+        LocalWake::State
+    );
+    assert_eq!(
+        classify_local_paths(&["/tmp/server/refresh".into()]),
+        LocalWake::Full
+    );
 }
 
 #[test]

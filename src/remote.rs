@@ -43,7 +43,9 @@ pub fn remote_stream_args(host: &str) -> Result<Vec<String>> {
         "-o".into(),
         "ServerAliveCountMax=2".into(),
         host.into(),
-        format!("exec \"$SHELL\" -lc '\"$HOME/.local/bin/tmux-seer\" stream --host {host}'"),
+        format!(
+            "exec \"$SHELL\" -lc 'socket=$(tmux display-message -p \"#{{socket_path}}\"); export TMUX=\"$socket,0,0\"; exec \"$HOME/.local/bin/tmux-seer\" stream --host {host}'"
+        ),
     ])
 }
 

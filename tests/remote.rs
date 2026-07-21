@@ -18,6 +18,8 @@ fn remote_stream_uses_keepalive_login_shell_and_known_binary() {
         assert!(args.iter().any(|arg| arg == expected), "missing {expected}");
     }
     let command = args.last().unwrap();
+    assert!(command.contains("tmux display-message -p \"#{socket_path}\""));
+    assert!(command.contains("export TMUX=\"$socket,0,0\""));
     assert!(command.contains("$HOME/.local/bin/tmux-seer"));
     assert!(command.contains("stream --host mac"));
     assert!(remote_stream_args("bad host").is_err());
