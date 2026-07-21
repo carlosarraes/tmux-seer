@@ -24,6 +24,30 @@ fn dashboard_with(states: &[AgentState]) -> Dashboard {
 }
 
 #[test]
+fn activity_age_advances_without_a_new_snapshot() {
+    let mut host = HostSnapshot::empty("local", 1_000);
+    host.push_test_agent(AgentState::Working);
+    let snapshot = AggregateSnapshot {
+        schema_version: SCHEMA_VERSION,
+        generated_at_ms: 1_000,
+        hosts: vec![host],
+    };
+    let mut dashboard = Dashboard::new_at(snapshot, 1_000);
+
+    assert!(dashboard
+        .rows()
+        .iter()
+        .any(|row| row.kind == RowKind::Agent && row.label.ends_with("0s")));
+
+    dashboard.refresh_elapsed(3_000);
+
+    assert!(dashboard
+        .rows()
+        .iter()
+        .any(|row| row.kind == RowKind::Agent && row.label.ends_with("2s")));
+}
+
+#[test]
 fn title_uses_seer_brand_and_input_count() {
     let dashboard = dashboard_with(&[
         AgentState::Working,

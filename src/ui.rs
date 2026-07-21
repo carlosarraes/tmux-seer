@@ -2,7 +2,8 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{self, Stdout},
-    time::{Duration, Instant},
+    path::Path,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -22,7 +23,7 @@ use ratatui::{
 
 use crate::{
     daemon::runtime_snapshot_path, model::AgentState, navigation::NavigationTarget,
-    popup::PopupLease, runtime, snapshot::AggregateSnapshot, tmux::Tmux,
+    popup::PopupLease, runtime, snapshot::AggregateSnapshot, tmux::Tmux, watcher::FileSignal,
 };
 
 const STATE_PRIORITY: [AgentState; 4] = [
@@ -61,10 +62,15 @@ pub struct Dashboard {
     filter: String,
     collapsed: HashSet<String>,
     renamed_sessions: HashMap<(String, String), String>,
+    clock_ms: u64,
 }
 
 impl Dashboard {
     pub fn new(snapshot: AggregateSnapshot) -> Self {
+        Self::new_at(snapshot, crate::tmux::now_ms())
+    }
+
+    pub fn new_at(snapshot: AggregateSnapshot, now_ms: u64) -> Self {
         let mut dashboard = Self {
             snapshot,
             rows: Vec::new(),
@@ -72,9 +78,18 @@ impl Dashboard {
             filter: String::new(),
             collapsed: HashSet::new(),
             renamed_sessions: HashMap::new(),
+            clock_ms: now_ms,
         };
         dashboard.rebuild(true);
         dashboard
+    }
+
+    pub fn refresh_elapsed(&mut self, now_ms: u64) {
+        if self.clock_ms / 1_000 == now_ms / 1_000 {
+            return;
+        }
+        self.clock_ms = now_ms;
+        self.rebuild(false);
     }
 
     pub fn title(&self) -> String {
@@ -331,7 +346,7 @@ impl Dashboard {
                                     pane.project,
                                     pane.agent,
                                     pane.state,
-                                    elapsed(self.snapshot.generated_at_ms, pane.state_since_ms)
+                                    elapsed(self.clock_ms, pane.state_since_ms)
                                 ),
                                 state: Some(pane.state),
                                 target: host
@@ -421,13 +436,25 @@ fn is_remote_target(target: Option<&NavigationTarget>) -> bool {
 }
 
 pub fn run(client: Option<String>) -> Result<Option<NavigationTarget>> {
+    let snapshot_path = runtime_snapshot_path();
+    let snapshot_directory = snapshot_path
+        .parent()
+        .context("snapshot path has no parent")?;
+    runtime::ensure_private_directory(snapshot_directory)?;
+    let mut snapshot_signal = FileSignal::watch(snapshot_directory)?;
     let _ = runtime::request_refresh();
     let snapshot = load_snapshot()?;
     let mut dashboard = Dashboard::new(snapshot);
     let tmux = Tmux::new();
     let _popup_lease = client.as_deref().map(PopupLease::new).transpose()?;
     let mut terminal = open_terminal()?;
-    let result = dashboard_loop(&mut terminal, &mut dashboard, &tmux);
+    let result = dashboard_loop(
+        &mut terminal,
+        &mut dashboard,
+        &tmux,
+        &mut snapshot_signal,
+        &snapshot_path,
+    );
     let cleanup = close_terminal(&mut terminal);
     match (result, cleanup) {
         (Err(error), _) => Err(error),
@@ -440,12 +467,12 @@ fn dashboard_loop(
     terminal: &mut Tui,
     dashboard: &mut Dashboard,
     tmux: &Tmux,
+    snapshot_signal: &mut FileSignal,
+    snapshot_path: &Path,
 ) -> Result<Option<NavigationTarget>> {
     let mut filter_mode = false;
     let mut rename_editor = None;
     let mut status_message = None;
-    let mut last_reload = Instant::now();
-
     let selected = loop {
         terminal.draw(|frame| {
             render(
@@ -473,20 +500,17 @@ fn dashboard_loop(
                 DashboardAction::Refresh => {
                     let _ = runtime::request_refresh();
                     status_message = Some("Refresh requested".to_owned());
-                    if let Ok(snapshot) = load_snapshot() {
-                        dashboard.replace_snapshot(snapshot);
-                    }
-                    last_reload = Instant::now();
                 }
                 DashboardAction::Continue => {}
             }
         }
-        if last_reload.elapsed() >= Duration::from_millis(500) {
+        let changed = snapshot_signal.try_changed()?;
+        if changed.iter().any(|path| path == snapshot_path) {
             if let Ok(snapshot) = load_snapshot() {
                 dashboard.replace_snapshot(snapshot);
             }
-            last_reload = Instant::now();
         }
+        dashboard.refresh_elapsed(crate::tmux::now_ms());
     };
     Ok(selected)
 }

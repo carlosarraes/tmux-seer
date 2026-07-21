@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::{sync::mpsc, time};
 
@@ -44,16 +44,35 @@ impl FileSignal {
         };
 
         time::sleep(COALESCE_WINDOW).await;
-        while let Ok(event) = self.events.try_recv() {
-            let event = event.context("filesystem watcher failed")?;
-            if is_change(&event) {
-                paths.extend(event.paths);
-            }
-        }
-        let mut unique = HashSet::new();
-        paths.retain(|path| unique.insert(path.clone()));
+        paths.extend(self.try_changed()?);
+        deduplicate(&mut paths);
         Ok(paths)
     }
+
+    pub fn try_changed(&mut self) -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        loop {
+            match self.events.try_recv() {
+                Ok(event) => {
+                    let event = event.context("filesystem watcher failed")?;
+                    if is_change(&event) {
+                        paths.extend(event.paths);
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    bail!("filesystem watcher stopped")
+                }
+            }
+        }
+        deduplicate(&mut paths);
+        Ok(paths)
+    }
+}
+
+fn deduplicate(paths: &mut Vec<PathBuf>) {
+    let mut unique = HashSet::new();
+    paths.retain(|path| unique.insert(path.clone()));
 }
 
 fn is_change(event: &Event) -> bool {
