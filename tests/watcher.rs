@@ -1,6 +1,21 @@
 use std::{fs, time::Duration};
 
-use tmux_seer::watcher::FileSignal;
+use tmux_seer::watcher::{paths_include_atomic_target, FileSignal};
+
+#[test]
+fn atomic_target_accepts_final_and_temporary_paths_only() {
+    let target = std::path::Path::new("/tmp/runtime/snapshot.json");
+
+    assert!(paths_include_atomic_target(&[target.to_owned()], target));
+    assert!(paths_include_atomic_target(
+        &["/tmp/runtime/snapshot.tmp-42".into()],
+        target
+    ));
+    assert!(!paths_include_atomic_target(
+        &["/tmp/runtime/health.tmp-42".into()],
+        target
+    ));
+}
 
 #[tokio::test]
 async fn atomic_write_bursts_coalesce_into_one_signal() {
@@ -26,18 +41,13 @@ async fn atomic_write_bursts_coalesce_into_one_signal() {
     );
 
     let destination = directory.path().join("snapshot.json");
-    let temporary = directory.path().join("snapshot.tmp");
+    let temporary = directory.path().join("snapshot.tmp-123");
     assert!(signal.try_changed().unwrap().is_empty());
     fs::write(&temporary, b"{}").unwrap();
     fs::rename(temporary, &destination).unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if signal
-                .try_changed()
-                .unwrap()
-                .iter()
-                .any(|path| path == &destination)
-            {
+            if paths_include_atomic_target(&signal.try_changed().unwrap(), &destination) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

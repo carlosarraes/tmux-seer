@@ -15,6 +15,24 @@ pub struct FileSignal {
     events: mpsc::Receiver<notify::Result<Event>>,
 }
 
+pub fn paths_include_atomic_target(paths: &[PathBuf], target: &Path) -> bool {
+    let Some(parent) = target.parent() else {
+        return paths.iter().any(|path| path == target);
+    };
+    let Some(stem) = target.file_stem().and_then(|stem| stem.to_str()) else {
+        return paths.iter().any(|path| path == target);
+    };
+    let temporary_prefix = format!("{stem}.tmp-");
+    paths.iter().any(|path| {
+        path == target
+            || path.parent() == Some(parent)
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&temporary_prefix))
+    })
+}
+
 impl FileSignal {
     pub fn watch(path: &Path) -> Result<Self> {
         let (sender, events) = mpsc::channel(64);

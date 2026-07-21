@@ -22,8 +22,14 @@ use ratatui::{
 };
 
 use crate::{
-    daemon::runtime_snapshot_path, model::AgentState, navigation::NavigationTarget,
-    popup::PopupLease, runtime, snapshot::AggregateSnapshot, tmux::Tmux, watcher::FileSignal,
+    daemon::runtime_snapshot_path,
+    model::AgentState,
+    navigation::NavigationTarget,
+    popup::PopupLease,
+    runtime,
+    snapshot::AggregateSnapshot,
+    tmux::Tmux,
+    watcher::{paths_include_atomic_target, FileSignal},
 };
 
 const STATE_PRIORITY: [AgentState; 4] = [
@@ -505,7 +511,7 @@ fn dashboard_loop(
             }
         }
         let changed = snapshot_signal.try_changed()?;
-        if changed.iter().any(|path| path == snapshot_path) {
+        if paths_include_atomic_target(&changed, snapshot_path) {
             if let Ok(snapshot) = load_snapshot() {
                 dashboard.replace_snapshot(snapshot);
             }
