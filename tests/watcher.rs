@@ -24,15 +24,9 @@ async fn atomic_write_bursts_coalesce_into_one_signal() {
             .is_err(),
         "burst leaked a second signal"
     );
-}
 
-#[tokio::test]
-async fn changed_paths_can_be_drained_without_blocking() {
-    let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("snapshot.json");
     let temporary = directory.path().join("snapshot.tmp");
-    let mut signal = FileSignal::watch(directory.path()).unwrap();
-
     assert!(signal.try_changed().unwrap().is_empty());
     fs::write(&temporary, b"{}").unwrap();
     fs::rename(temporary, &destination).unwrap();
