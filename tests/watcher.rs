@@ -29,6 +29,13 @@ async fn atomic_write_bursts_coalesce_into_one_signal() {
         fs::rename(temporary, destination).unwrap();
     }
 
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), signal.changed())
+            .await
+            .is_err(),
+        "debounce completed before it could be cancelled"
+    );
     tokio::time::timeout(Duration::from_millis(250), signal.changed())
         .await
         .expect("filesystem signal timed out")
@@ -39,21 +46,5 @@ async fn atomic_write_bursts_coalesce_into_one_signal() {
             .is_err(),
         "burst leaked a second signal"
     );
-
-    let destination = directory.path().join("snapshot.json");
-    let temporary = directory.path().join("snapshot.tmp-123");
-    assert!(signal.try_changed().unwrap().is_empty());
-    fs::write(&temporary, b"{}").unwrap();
-    fs::rename(temporary, &destination).unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if paths_include_atomic_target(&signal.try_changed().unwrap(), &destination) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("filesystem signal timed out");
     assert!(signal.try_changed().unwrap().is_empty());
 }

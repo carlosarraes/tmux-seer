@@ -13,6 +13,7 @@ const COALESCE_WINDOW: Duration = Duration::from_millis(25);
 pub struct FileSignal {
     _watcher: RecommendedWatcher,
     events: mpsc::Receiver<notify::Result<Event>>,
+    pending: Vec<PathBuf>,
 }
 
 pub fn paths_include_atomic_target(paths: &[PathBuf], target: &Path) -> bool {
@@ -46,28 +47,40 @@ impl FileSignal {
         Ok(Self {
             _watcher: watcher,
             events,
+            pending: Vec::new(),
         })
     }
 
     pub async fn changed(&mut self) -> Result<Vec<PathBuf>> {
-        let mut paths = loop {
-            let event = self
-                .events
-                .recv()
-                .await
-                .context("filesystem watcher stopped")??;
-            if is_change(&event) {
-                break event.paths;
+        if self.pending.is_empty() {
+            loop {
+                let event = self
+                    .events
+                    .recv()
+                    .await
+                    .context("filesystem watcher stopped")??;
+                if is_change(&event) {
+                    self.pending.extend(event.paths);
+                    break;
+                }
             }
-        };
+        }
 
         time::sleep(COALESCE_WINDOW).await;
-        paths.extend(self.try_changed()?);
+        let mut paths = std::mem::take(&mut self.pending);
+        paths.extend(self.drain_events()?);
         deduplicate(&mut paths);
         Ok(paths)
     }
 
     pub fn try_changed(&mut self) -> Result<Vec<PathBuf>> {
+        let mut paths = std::mem::take(&mut self.pending);
+        paths.extend(self.drain_events()?);
+        deduplicate(&mut paths);
+        Ok(paths)
+    }
+
+    fn drain_events(&mut self) -> Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
         loop {
             match self.events.try_recv() {
@@ -83,7 +96,6 @@ impl FileSignal {
                 }
             }
         }
-        deduplicate(&mut paths);
         Ok(paths)
     }
 }
