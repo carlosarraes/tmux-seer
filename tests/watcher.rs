@@ -34,12 +34,20 @@ async fn changed_paths_can_be_drained_without_blocking() {
 
     assert!(signal.try_changed().unwrap().is_empty());
     fs::write(&destination, b"{}").unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    assert!(signal
-        .try_changed()
-        .unwrap()
-        .iter()
-        .any(|path| path == &destination));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if signal
+                .try_changed()
+                .unwrap()
+                .iter()
+                .any(|path| path == &destination)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("filesystem signal timed out");
     assert!(signal.try_changed().unwrap().is_empty());
 }
