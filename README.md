@@ -35,6 +35,8 @@ tmux-seer doctor
 
 Setup previews an exact diff and changes nothing until you approve it. Restart active agents afterward; Codex also requires trusting the new definitions through `/hooks`.
 
+When upgrading from `0.0.x`, `prefix + I` replaces the legacy daemon automatically. Run `tmux-seer setup` and select configured remote integrations once so those hosts receive the matching `0.1.x` binary. Existing hook commands do not need to be reinstalled.
+
 ## Use
 
 - `prefix + S` — quick popup
@@ -46,6 +48,7 @@ Setup previews an exact diff and changes nothing until you approve it. Restart a
 | `h` / `l` | Previous or next online host |
 | `Tab` | Fold or expand |
 | `/` | Filter |
+| `R` | Refresh now and reconcile stale agent state |
 | `Enter` | Jump locally or attach remotely |
 | `r` | Rename a session inline |
 | `q`, `Esc` | Close |
@@ -76,10 +79,26 @@ Run `tmux-seer setup` again after adding a host. The picker installs the matchin
 | `@seer_popup_width` | `76` | Popup columns |
 | `@seer_popup_height` | `70%` | Popup height |
 | `@seer_remote_interval_ms` | `2000` | Remote refresh interval |
+| `@seer_remote_max_backoff_ms` | `60000` | Maximum retry delay for an offline host |
 | `@seer_notify_ms` | `4000` | Notification duration |
+| `@seer_log_level` | `warn` | `warn`, `error`, or opt-in `debug` diagnostics |
 | `@seer_binary` | auto | Binary path override |
 
-Status colors use `@seer_color_working`, `@seer_color_idle`, `@seer_color_needs_input`, and `@seer_color_untracked`.
+Status colors use `@seer_color_working`, `@seer_color_idle`, `@seer_color_input`, and `@seer_color_offline`.
+
+Hooks and popup leases use private runtime files rather than tmux options, so agent activity cannot block tmux or trigger status-theme redraws. Seer automatically removes stale pane records; `R` forces that reconciliation and retries every remote host immediately.
+
+Pane topology and process discovery may lag by up to five seconds. Hook-driven state changes remain fast; use `R` when you need an immediate full rescan. Offline hosts back off to the configured retry limit instead of slowing healthy hosts.
+
+For diagnostics:
+
+```sh
+tmux-seer doctor
+tmux-seer logs
+tmux-seer logs --follow
+```
+
+Logs rotate at 1 MiB and retain one previous file. They contain timing, host aliases, and errors—not prompts, transcripts, or terminal output.
 
 </details>
 
