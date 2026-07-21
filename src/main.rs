@@ -3,7 +3,12 @@ use std::io::{self, Read};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tmux_seer::{
-    adapters::NativeEvent, model::AgentKind, navigation::Navigator, snapshot::AgentKey, tmux::Tmux,
+    adapters::{normalize, NativeEvent},
+    hook_state::HookStateStore,
+    model::AgentKind,
+    navigation::Navigator,
+    snapshot::AgentKey,
+    tmux::{now_ms, Tmux},
 };
 
 #[derive(Debug, Parser)]
@@ -58,6 +63,12 @@ enum Command {
     },
     /// Check tmux, SSH hosts, binaries, and hook configuration.
     Doctor,
+    /// Print bounded daemon logs.
+    Logs {
+        /// Continue printing new log entries.
+        #[arg(long)]
+        follow: bool,
+    },
 }
 
 #[tokio::main]
@@ -88,7 +99,7 @@ async fn main() -> Result<()> {
                 reason: string_field(&payload, &["reason", "message"]),
             };
             let pane = std::env::var("TMUX_PANE")?;
-            Tmux::new().apply_hook(&pane, native)
+            HookStateStore::from_env().apply(&pane, normalize(native), now_ms())
         }
         Command::Snapshot { host, json: _ } => {
             let snapshot = Tmux::new().snapshot(&host)?;
@@ -137,8 +148,10 @@ async fn main() -> Result<()> {
             println!("{}", tmux_seer::setup::doctor()?);
             Ok(())
         }
+        Command::Logs { follow } => tmux_seer::diagnostics::print_logs(follow),
         Command::Bootstrap => {
             let binary = std::env::current_exe()?;
+            tmux_seer::bootstrap::restart_existing_daemons()?;
             tmux_seer::bootstrap::bootstrap(Tmux::new(), &binary.to_string_lossy())
         }
     }

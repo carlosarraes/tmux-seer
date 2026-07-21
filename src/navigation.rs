@@ -169,7 +169,7 @@ impl Navigator {
             _ => bail!("incomplete remote tmux target"),
         };
         let ssh = std::env::var_os("TMUX_SEER_SSH").unwrap_or_else(|| "ssh".into());
-        let _suppression = client.map(|client| PopupLease::new(self.tmux.clone(), client));
+        let _suppression = client.map(PopupLease::new).transpose()?;
         let remote = remote_login_command(&remote);
         let mut child = Command::new(ssh)
             .args([

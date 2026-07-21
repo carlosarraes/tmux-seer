@@ -1,7 +1,6 @@
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
-    fs::{self, File, OpenOptions},
-    hash::{Hash, Hasher},
+    collections::{HashMap, HashSet},
+    fs::{File, OpenOptions},
     path::PathBuf,
     process::Stdio,
     time::Duration,
@@ -12,13 +11,39 @@ use fs2::FileExt;
 use tokio::{process::Command, task::JoinSet, time};
 
 use crate::{
+    diagnostics::{Diagnostics, HealthSnapshot, HostHealth, LogLevel},
     model::AgentState,
+    popup::client_is_suppressed,
+    runtime,
+    scheduler::HostSchedule,
     snapshot::{
         aggregate_online, status_widget_with, AgentKey, AggregateSnapshot, HostSnapshot,
-        StatusColors, SCHEMA_VERSION,
+        ProcessTable, StatusColors, SCHEMA_VERSION,
     },
     tmux::{now_ms, Tmux},
 };
+
+const LOCAL_INTERVAL_MS: u64 = 500;
+const TOPOLOGY_INTERVAL_MS: u64 = 5_000;
+const PROCESS_INTERVAL_MS: u64 = 5_000;
+const CONFIG_INTERVAL_MS: u64 = 5_000;
+const SNAPSHOT_HEARTBEAT_MS: u64 = 5_000;
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
+const LOOP_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug)]
+struct RemoteResult {
+    host: String,
+    started_at_ms: u64,
+    finished_at_ms: u64,
+    result: std::result::Result<HostSnapshot, String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RemoteTiming {
+    interval_ms: u64,
+    maximum_backoff_ms: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct HostTracker {
@@ -72,20 +97,6 @@ pub fn notification_for_transition(
         .then_some("finished; now idle")
 }
 
-pub fn popup_option_name(client: &str) -> String {
-    let safe: String = client
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("@seer_popup_{safe}")
-}
-
 pub fn remote_snapshot_args(host: &str) -> Result<Vec<String>> {
     if host.is_empty()
         || !host
@@ -115,7 +126,7 @@ pub fn format_notification(
 }
 
 pub fn runtime_snapshot_path() -> PathBuf {
-    runtime_directory().join(format!("{}.json", server_key()))
+    runtime::current_server_directory().join("snapshot.json")
 }
 
 pub async fn run() -> Result<()> {
@@ -132,9 +143,29 @@ pub async fn run() -> Result<()> {
         .parse::<u64>()
         .unwrap_or(2_000)
         .max(500);
+    let remote_max_backoff = option(&tmux, "@seer_remote_max_backoff_ms", "60000")
+        .parse::<u64>()
+        .unwrap_or(60_000)
+        .max(remote_interval);
+    let remote_timing = RemoteTiming {
+        interval_ms: remote_interval,
+        maximum_backoff_ms: remote_max_backoff,
+    };
     let notification_duration = option(&tmux, "@seer_notify_ms", "4000")
         .parse::<u64>()
         .unwrap_or(4_000);
+    let diagnostics =
+        Diagnostics::current(LogLevel::parse(&option(&tmux, "@seer_log_level", "warn")))?;
+    diagnostics.log(
+        LogLevel::Debug,
+        "daemon",
+        &format!(
+            "started with {} remote hosts; remote interval {}ms; maximum backoff {}ms",
+            hosts.len(),
+            remote_timing.interval_ms,
+            remote_timing.maximum_backoff_ms
+        ),
+    )?;
     let colors = StatusColors {
         working: option(&tmux, "@seer_color_working", "#9ece6a"),
         idle: option(&tmux, "@seer_color_idle", "#e0af68"),
@@ -145,41 +176,146 @@ pub async fn run() -> Result<()> {
         .chain(hosts.iter().cloned())
         .map(|host| (host.clone(), HostTracker::new(host)))
         .collect();
+    let mut schedules = hosts
+        .iter()
+        .cloned()
+        .map(|host| (host, HostSchedule::immediate()))
+        .collect::<HashMap<_, _>>();
+    let mut remote_tasks = JoinSet::new();
+    let mut in_flight = HashSet::new();
+    let mut host_health = HashMap::new();
     let mut previous: HashMap<AgentKey, AgentState> = HashMap::new();
     let mut previous_online: HashMap<String, bool> = HashMap::new();
     let mut previous_widget = None;
+    let mut previous_published = Vec::new();
+    let mut processes = ProcessTable::default();
+    let mut pane_rows = None;
     let mut initial = true;
-    let mut last_remote = 0;
+    let mut last_local = 0;
+    let mut last_topology = 0;
+    let mut last_process = 0;
+    let mut last_config = 0;
+    let mut last_publish = 0;
+    let mut refresh_token = runtime::refresh_token();
+    let mut local_scan_ms = 0;
 
     loop {
         let now = now_ms();
-        if reconcile_hosts(
-            &option(&tmux, "@seer_hosts", ""),
-            &mut hosts,
-            &mut trackers,
-            &mut previous,
-            &mut previous_online,
-        ) {
-            last_remote = 0;
-        }
-        match tmux.snapshot("local") {
-            Ok(snapshot) => trackers.get_mut("local").unwrap().success(snapshot),
-            Err(error) => trackers
-                .get_mut("local")
-                .unwrap()
-                .failure(error.to_string(), now),
+        let next_refresh_token = runtime::refresh_token();
+        let forced = next_refresh_token != refresh_token;
+        refresh_token = next_refresh_token;
+
+        if forced || now.saturating_sub(last_config) >= CONFIG_INTERVAL_MS {
+            if reconcile_hosts(
+                &option(&tmux, "@seer_hosts", ""),
+                &mut hosts,
+                &mut trackers,
+                &mut previous,
+                &mut previous_online,
+            ) {
+                let configured = hosts.iter().cloned().collect::<HashSet<_>>();
+                schedules.retain(|host, _| configured.contains(host));
+                in_flight.retain(|host| configured.contains(host));
+                host_health.retain(|host, _| configured.contains(host));
+                for host in &hosts {
+                    schedules.entry(host.clone()).or_default().force(now);
+                }
+            }
+            last_config = now;
         }
 
-        if now.saturating_sub(last_remote) >= remote_interval {
-            collect_remotes(&hosts, &mut trackers, now).await;
-            last_remote = now;
+        if forced {
+            let _ = diagnostics.log(LogLevel::Debug, "daemon", "forced refresh requested");
+            last_local = 0;
+            last_topology = 0;
+            last_process = 0;
+            for schedule in schedules.values_mut() {
+                schedule.force(now);
+            }
         }
+
+        if last_local == 0 || now.saturating_sub(last_local) >= LOCAL_INTERVAL_MS {
+            let scan_started = now_ms();
+            let refresh_topology =
+                last_topology == 0 || now.saturating_sub(last_topology) >= TOPOLOGY_INTERVAL_MS;
+            let mut topology_is_fresh = false;
+            if refresh_topology {
+                match tmux.pane_rows() {
+                    Ok(rows) => {
+                        pane_rows = Some(rows);
+                        topology_is_fresh = true;
+                    }
+                    Err(error) => {
+                        let error = error.to_string();
+                        let _ = diagnostics.log(LogLevel::Warn, "local", &error);
+                        if pane_rows.is_none() {
+                            trackers.get_mut("local").unwrap().failure(error, now);
+                        }
+                    }
+                }
+                last_topology = now;
+            }
+            let refreshed_processes =
+                last_process == 0 || now.saturating_sub(last_process) >= PROCESS_INTERVAL_MS;
+            if refreshed_processes {
+                processes = tmux.process_table();
+                last_process = now;
+            }
+            if let Some(rows) = pane_rows.as_deref() {
+                match tmux.snapshot_from_rows(
+                    "local",
+                    rows,
+                    &processes,
+                    topology_is_fresh && refreshed_processes,
+                ) {
+                    Ok(snapshot) => trackers.get_mut("local").unwrap().success(snapshot),
+                    Err(error) => {
+                        let error = error.to_string();
+                        let _ = diagnostics.log(LogLevel::Warn, "local", &error);
+                        trackers.get_mut("local").unwrap().failure(error, now);
+                    }
+                }
+            }
+            local_scan_ms = now_ms().saturating_sub(scan_started);
+            let _ = diagnostics.log(
+                LogLevel::Debug,
+                "local",
+                &format!("scan completed in {local_scan_ms}ms"),
+            );
+            last_local = now;
+        }
+
+        drain_ready_remotes(
+            &mut remote_tasks,
+            &mut trackers,
+            &mut schedules,
+            &mut in_flight,
+            &mut host_health,
+            &diagnostics,
+            remote_timing,
+        );
+        spawn_due_remotes(&hosts, &schedules, &mut in_flight, &mut remote_tasks, now);
 
         let snapshots: Vec<HostSnapshot> = std::iter::once("local")
             .chain(hosts.iter().map(String::as_str))
             .filter_map(|host| trackers.get(host).and_then(HostTracker::snapshot).cloned())
             .collect();
-        publish_snapshot(&snapshots, now)?;
+        if !same_snapshot_content(&previous_published, &snapshots)
+            || now.saturating_sub(last_publish) >= SNAPSHOT_HEARTBEAT_MS
+        {
+            publish_snapshot(&snapshots, now)?;
+            let health = HealthSnapshot {
+                generated_at_ms: now,
+                local_scan_ms,
+                hosts: hosts
+                    .iter()
+                    .filter_map(|host| host_health.get(host).cloned())
+                    .collect(),
+            };
+            diagnostics.publish_health(&health)?;
+            previous_published = snapshots.clone();
+            last_publish = now;
+        }
         let aggregate = aggregate_online(snapshots.iter());
         publish_widget_if_changed(
             &mut previous_widget,
@@ -226,7 +362,7 @@ pub async fn run() -> Result<()> {
         initial = false;
 
         tokio::select! {
-            _ = time::sleep(Duration::from_millis(500)) => {}
+            _ = time::sleep(LOOP_INTERVAL) => {}
             result = tokio::signal::ctrl_c() => {
                 result.context("failed to listen for shutdown")?;
                 return Ok(());
@@ -263,48 +399,127 @@ fn reconcile_hosts(
     true
 }
 
-async fn collect_remotes(hosts: &[String], trackers: &mut HashMap<String, HostTracker>, now: u64) {
+fn spawn_due_remotes(
+    hosts: &[String],
+    schedules: &HashMap<String, HostSchedule>,
+    in_flight: &mut HashSet<String>,
+    tasks: &mut JoinSet<RemoteResult>,
+    now: u64,
+) {
     let ssh = std::env::var_os("TMUX_SEER_SSH").unwrap_or_else(|| "ssh".into());
-    let mut tasks = JoinSet::new();
     for host in hosts {
+        if in_flight.contains(host)
+            || !schedules
+                .get(host)
+                .is_some_and(|schedule| schedule.is_due(now))
+        {
+            continue;
+        }
+        in_flight.insert(host.clone());
         let host = host.clone();
         let ssh = ssh.clone();
-        tasks.spawn(async move {
-            let result = async {
-                let args = remote_snapshot_args(&host)?;
-                let output = Command::new(ssh)
-                    .args(args)
-                    .stdin(Stdio::null())
-                    .output()
-                    .await
-                    .with_context(|| format!("failed to run SSH for {host}"))?;
-                if !output.status.success() {
-                    bail!(
-                        "{}",
-                        String::from_utf8_lossy(&output.stderr).trim().to_owned()
+        tasks.spawn(async move { collect_remote(host, ssh, now).await });
+    }
+}
+
+async fn collect_remote(host: String, ssh: std::ffi::OsString, started_at_ms: u64) -> RemoteResult {
+    let result = async {
+        let args = remote_snapshot_args(&host)?;
+        let output = time::timeout(
+            REMOTE_TIMEOUT,
+            Command::new(ssh).args(args).stdin(Stdio::null()).output(),
+        )
+        .await
+        .with_context(|| format!("SSH snapshot timed out for {host}"))?
+        .with_context(|| format!("failed to run SSH for {host}"))?;
+        if !output.status.success() {
+            bail!(
+                "{}",
+                String::from_utf8_lossy(&output.stderr).trim().to_owned()
+            );
+        }
+        let snapshot: HostSnapshot = serde_json::from_slice(&output.stdout)
+            .with_context(|| format!("invalid snapshot from {host}"))?;
+        if snapshot.schema_version != SCHEMA_VERSION {
+            bail!("snapshot schema mismatch from {host}");
+        }
+        Ok::<_, anyhow::Error>(snapshot)
+    }
+    .await
+    .map_err(|error| error.to_string());
+    RemoteResult {
+        host,
+        started_at_ms,
+        finished_at_ms: now_ms(),
+        result,
+    }
+}
+
+fn drain_ready_remotes(
+    tasks: &mut JoinSet<RemoteResult>,
+    trackers: &mut HashMap<String, HostTracker>,
+    schedules: &mut HashMap<String, HostSchedule>,
+    in_flight: &mut HashSet<String>,
+    health: &mut HashMap<String, HostHealth>,
+    diagnostics: &Diagnostics,
+    timing: RemoteTiming,
+) -> usize {
+    let mut applied = 0;
+    while let Some(result) = tasks.try_join_next() {
+        match result {
+            Ok(remote) => {
+                in_flight.remove(&remote.host);
+                let succeeded = remote.result.is_ok();
+                let error = remote.result.as_ref().err().cloned();
+                let latency_ms = remote.finished_at_ms.saturating_sub(remote.started_at_ms);
+                record_remote_result(trackers, &remote.host, remote.result, remote.finished_at_ms);
+                if let Some(schedule) = schedules.get_mut(&remote.host) {
+                    if succeeded {
+                        schedule.success(remote.finished_at_ms, timing.interval_ms);
+                    } else {
+                        schedule.failure(
+                            remote.finished_at_ms,
+                            timing.interval_ms,
+                            timing.maximum_backoff_ms,
+                        );
+                    }
+                    let online = trackers
+                        .get(&remote.host)
+                        .and_then(HostTracker::snapshot)
+                        .is_some_and(|snapshot| snapshot.online);
+                    health.insert(
+                        remote.host.clone(),
+                        HostHealth {
+                            host: remote.host.clone(),
+                            online,
+                            latency_ms,
+                            failures: schedule.failures(),
+                            next_retry_ms: schedule.next_due_ms(),
+                            last_error: error.clone(),
+                        },
                     );
                 }
-                let snapshot: HostSnapshot = serde_json::from_slice(&output.stdout)
-                    .with_context(|| format!("invalid snapshot from {host}"))?;
-                if snapshot.schema_version != SCHEMA_VERSION {
-                    bail!("snapshot schema mismatch from {host}");
+                if let Some(error) = error {
+                    let _ = diagnostics.log(LogLevel::Warn, &remote.host, &error);
+                } else {
+                    let _ = diagnostics.log(
+                        LogLevel::Debug,
+                        &remote.host,
+                        &format!("scan completed in {latency_ms}ms"),
+                    );
                 }
-                Ok::<_, anyhow::Error>(snapshot)
+                applied += 1;
             }
-            .await
-            .map_err(|error| error.to_string());
-            (host, result)
-        });
-    }
-
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok((host, remote_result)) => {
-                record_remote_result(trackers, &host, remote_result, now);
+            Err(error) => {
+                let _ = diagnostics.log(
+                    LogLevel::Error,
+                    "remote",
+                    &format!("collector task failed: {error}"),
+                );
             }
-            Err(error) => eprintln!("Seer remote collector task failed: {error}"),
         }
     }
+    applied
 }
 
 fn record_remote_result(
@@ -325,11 +540,7 @@ fn record_remote_result(
 fn notify_clients(tmux: &Tmux, duration_ms: u64, message: &str, now: u64) {
     let Ok(clients) = tmux.clients() else { return };
     for client in clients {
-        let popup_until = tmux
-            .show_global_option(&popup_option_name(&client))
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or_default();
-        if popup_until <= now {
+        if !client_is_suppressed(&client, now) {
             let _ = tmux.display_message(&client, duration_ms, message);
         }
     }
@@ -337,49 +548,41 @@ fn notify_clients(tmux: &Tmux, duration_ms: u64, message: &str, now: u64) {
 
 fn publish_snapshot(hosts: &[HostSnapshot], now: u64) -> Result<()> {
     let path = runtime_snapshot_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("json.tmp");
     let snapshot = AggregateSnapshot {
         schema_version: SCHEMA_VERSION,
         generated_at_ms: now,
         hosts: hosts.to_vec(),
     };
-    fs::write(&temporary, serde_json::to_vec(&snapshot)?)?;
-    fs::rename(temporary, path)?;
-    Ok(())
+    runtime::atomic_write(&path, &serde_json::to_vec(&snapshot)?)
+}
+
+fn same_snapshot_content(previous: &[HostSnapshot], current: &[HostSnapshot]) -> bool {
+    if previous.len() != current.len() {
+        return false;
+    }
+    previous.iter().zip(current).all(|(previous, current)| {
+        let mut previous = previous.clone();
+        let mut current = current.clone();
+        previous.collected_at_ms = 0;
+        current.collected_at_ms = 0;
+        previous == current
+    })
 }
 
 fn acquire_lock() -> Result<Option<File>> {
-    let directory = runtime_directory();
-    fs::create_dir_all(&directory)?;
+    let directory = runtime::current_server_directory();
+    runtime::ensure_private_directory(&directory)?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(directory.join(format!("{}.lock", server_key())))?;
+        .open(directory.join("daemon.lock"))?;
     match lock.try_lock_exclusive() {
         Ok(()) => Ok(Some(lock)),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(error.into()),
     }
-}
-
-fn runtime_directory() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("tmux-seer")
-}
-
-fn server_key() -> u64 {
-    let tmux = std::env::var("TMUX").unwrap_or_else(|_| "default".into());
-    let identity = tmux.split(',').take(2).collect::<Vec<_>>().join(",");
-    let mut hasher = DefaultHasher::new();
-    identity.hash(&mut hasher);
-    hasher.finish()
 }
 
 fn option(tmux: &Tmux, name: &str, default: &str) -> String {
@@ -494,5 +697,53 @@ mod tests {
 
         assert!(!trackers["mac"].snapshot().unwrap().online);
         assert!(trackers["zapsign"].snapshot().unwrap().online);
+    }
+
+    #[tokio::test]
+    async fn ready_remote_result_is_applied_while_another_host_is_still_pending() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(std::future::pending::<RemoteResult>());
+        tasks.spawn(async {
+            RemoteResult {
+                host: "fast".into(),
+                started_at_ms: 10,
+                finished_at_ms: 20,
+                result: Ok(HostSnapshot::empty("fast", 20)),
+            }
+        });
+        tokio::task::yield_now().await;
+        let mut trackers = HashMap::from([
+            ("slow".into(), HostTracker::new("slow")),
+            ("fast".into(), HostTracker::new("fast")),
+        ]);
+        let mut schedules = HashMap::from([
+            ("slow".into(), HostSchedule::immediate()),
+            ("fast".into(), HostSchedule::immediate()),
+        ]);
+        let mut in_flight = HashSet::from(["slow".into(), "fast".into()]);
+        let mut health = HashMap::new();
+        let directory = tempfile::tempdir().unwrap();
+        let diagnostics = Diagnostics::at(directory.path(), 1_024, LogLevel::Warn).unwrap();
+
+        let applied = drain_ready_remotes(
+            &mut tasks,
+            &mut trackers,
+            &mut schedules,
+            &mut in_flight,
+            &mut health,
+            &diagnostics,
+            RemoteTiming {
+                interval_ms: 2_000,
+                maximum_backoff_ms: 60_000,
+            },
+        );
+
+        assert_eq!(applied, 1);
+        assert!(trackers["fast"].snapshot().unwrap().online);
+        assert_eq!(health["fast"].latency_ms, 10);
+        assert_eq!(health["fast"].failures, 0);
+        assert!(!in_flight.contains("fast"));
+        assert!(in_flight.contains("slow"));
+        tasks.abort_all();
     }
 }

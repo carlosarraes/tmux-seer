@@ -133,12 +133,18 @@ fn remote_agent_navigation_uses_current_popup_without_bridge_windows() {
 fn remote_popup_suppresses_notifications_for_its_client() {
     let tmux = FakeTmux::new();
     let ssh = FakeSsh::new();
+    let runtime = tempfile::tempdir().unwrap();
     temp_env::with_vars(
         [
             ("TMUX_SEER_TMUX", Some(tmux.program.to_str().unwrap())),
             ("TMUX_SEER_TEST_LOG", Some(tmux.log.to_str().unwrap())),
             ("TMUX_SEER_SSH", Some(ssh.program.to_str().unwrap())),
             ("TMUX_SEER_SSH_LOG", Some(ssh.log.to_str().unwrap())),
+            (
+                "TMUX_SEER_RUNTIME_DIR",
+                Some(runtime.path().to_str().unwrap()),
+            ),
+            ("TMUX", Some("/tmp/tmux-test/default,123,0")),
         ],
         || {
             Navigator::new(Tmux::new())
@@ -151,8 +157,7 @@ fn remote_popup_suppresses_notifications_for_its_client() {
     );
 
     let log = fs::read_to_string(tmux.log).unwrap_or_default();
-    assert!(log.contains("set-option -g @seer_popup__dev_pts_1"));
-    assert!(log.contains("set-option -g -u @seer_popup__dev_pts_1"));
+    assert!(!log.contains("@seer_popup"));
 }
 
 #[test]

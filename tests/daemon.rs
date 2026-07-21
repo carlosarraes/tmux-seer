@@ -1,6 +1,5 @@
 use tmux_seer::daemon::{
-    format_notification, notification_for_transition, popup_option_name, remote_snapshot_args,
-    HostTracker,
+    format_notification, notification_for_transition, remote_snapshot_args, HostTracker,
 };
 use tmux_seer::model::AgentState;
 use tmux_seer::snapshot::HostSnapshot;
@@ -41,11 +40,6 @@ fn remote_goes_offline_after_two_failures_and_retains_tree() {
     assert!(!cached.online);
     assert_eq!(cached.sessions.len(), 1);
     assert_eq!(cached.error.as_deref(), Some("timeout"));
-}
-
-#[test]
-fn popup_option_is_safe_for_tmux_user_option_names() {
-    assert_eq!(popup_option_name("/dev/pts/12"), "@seer_popup__dev_pts_12");
 }
 
 #[test]

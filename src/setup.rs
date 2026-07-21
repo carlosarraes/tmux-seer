@@ -27,6 +27,7 @@ use similar::TextDiff;
 
 use crate::{
     daemon::runtime_snapshot_path,
+    diagnostics::{format_host_health, load_health},
     snapshot::AggregateSnapshot,
     tmux::{now_ms, Tmux},
 };
@@ -471,6 +472,19 @@ pub fn doctor() -> Result<String> {
             lines.push(format!("[{level}] runtime snapshot: {description}"));
         }
         None => lines.push("[warn] runtime snapshot: missing; daemon may not be running".into()),
+    }
+    if let Some(health) = load_health() {
+        let now = now_ms();
+        lines.push(format!(
+            "[ok] daemon local scan: {}ms",
+            health.local_scan_ms
+        ));
+        for host in &health.hosts {
+            let (level, description) = format_host_health(host, now);
+            lines.push(format!("[{level}] daemon {description}"));
+        }
+    } else {
+        lines.push("[warn] daemon health: unavailable".into());
     }
     let hosts = tmux.show_global_option("@seer_hosts").unwrap_or_default();
     for host in hosts.split_whitespace() {

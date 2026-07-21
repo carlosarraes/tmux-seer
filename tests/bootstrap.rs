@@ -1,9 +1,22 @@
 use std::{fs, os::unix::fs::PermissionsExt};
 use tempfile::TempDir;
 use tmux_seer::{
-    bootstrap::{bootstrap, with_status_widget},
+    bootstrap::{bootstrap, daemon_pids_for_server, with_status_widget},
     tmux::Tmux,
 };
+
+#[test]
+fn daemon_restart_targets_only_seer_children_of_the_current_tmux_server() {
+    let processes = r#"
+  10     1 tmux
+  20    10 /home/me/.local/bin/tmux-seer daemon
+  21    10 /home/me/.local/bin/tmux-seer snapshot --host local
+  22    11 /home/me/.local/bin/tmux-seer daemon
+  23    10 /bin/sh -c tmux-seer daemon
+"#;
+
+    assert_eq!(daemon_pids_for_server(processes, 10), vec![20]);
+}
 
 #[test]
 fn status_widget_append_is_idempotent_and_preserves_theme() {
@@ -26,6 +39,8 @@ fn bootstrap_sets_binding_and_status_without_touching_interval() {
     let log = fs::read_to_string(fake.log).unwrap();
     assert!(log.contains("set-option -g status-right #[fg=red]theme #{@seer_widget}"));
     assert!(log.contains("set-option -g @seer_fullscreen_key s"));
+    assert!(log.contains("set-option -g @seer_remote_max_backoff_ms 60000"));
+    assert!(log.contains("set-option -g @seer_log_level warn"));
     assert!(log.contains("bind-key S run-shell -C display-popup"));
     assert!(log.contains("display-popup -EE"));
     assert!(log.contains("popup --client '#{client_tty}'"));

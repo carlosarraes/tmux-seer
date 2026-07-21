@@ -7,6 +7,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::hook_state::PaneState;
 use crate::model::{AgentKind, AgentState};
 
 pub const SCHEMA_VERSION: u16 = 1;
@@ -223,6 +224,43 @@ pub fn parse_tmux_rows_with_processes(
     input: &str,
     processes: &ProcessTable,
 ) -> Result<HostSnapshot> {
+    parse_tmux_rows_with_processes_and_states(
+        host,
+        collected_at_ms,
+        input,
+        processes,
+        &HashMap::new(),
+    )
+}
+
+pub fn parse_tmux_rows_with_processes_and_states(
+    host: &str,
+    collected_at_ms: u64,
+    input: &str,
+    processes: &ProcessTable,
+    states: &HashMap<String, PaneState>,
+) -> Result<HostSnapshot> {
+    parse_tmux_rows_with_process_data(host, collected_at_ms, input, processes, states, true)
+}
+
+pub fn parse_tmux_rows_with_cached_processes_and_states(
+    host: &str,
+    collected_at_ms: u64,
+    input: &str,
+    processes: &ProcessTable,
+    states: &HashMap<String, PaneState>,
+) -> Result<HostSnapshot> {
+    parse_tmux_rows_with_process_data(host, collected_at_ms, input, processes, states, false)
+}
+
+fn parse_tmux_rows_with_process_data(
+    host: &str,
+    collected_at_ms: u64,
+    input: &str,
+    processes: &ProcessTable,
+    states: &HashMap<String, PaneState>,
+    processes_are_fresh: bool,
+) -> Result<HostSnapshot> {
     let mut snapshot = HostSnapshot::empty(host, collected_at_ms);
 
     for (line_number, line) in input.lines().enumerate() {
@@ -234,26 +272,36 @@ pub fn parse_tmux_rows_with_processes(
         } else {
             line.split(TMUX_ESCAPED_FIELD_SEPARATOR).collect()
         };
-        if fields.len() != 16 {
+        if !matches!(fields.len(), 16 | 17) {
             bail!(
-                "tmux row {} has {} fields, expected 16",
+                "tmux row {} has {} fields, expected 16 or 17",
                 line_number + 1,
                 fields.len()
             );
         }
 
-        let configured_agent = (!fields[10].is_empty())
-            .then(|| AgentKind::from_str(fields[10]).ok())
-            .flatten();
+        let file_state = states.get(fields[5]);
+        let file_record = file_state.and_then(|state| state.record.as_ref());
+        let configured_agent = match file_state {
+            Some(_) => file_record.map(|record| record.agent),
+            None => (!fields[10].is_empty())
+                .then(|| AgentKind::from_str(fields[10]).ok())
+                .flatten(),
+        };
         let pane_pid = fields[8].parse::<u32>().ok();
         let live_agent = pane_pid.and_then(|pid| processes.agent_below(pid));
         let agent = if processes.is_empty() {
             configured_agent.or_else(|| detect_agent(fields[9]))
-        } else {
+        } else if processes_are_fresh {
             live_agent
+        } else {
+            configured_agent.or(live_agent)
         };
         let Some(agent) = agent else { continue };
-        let state = if !fields[11].is_empty() && configured_agent == Some(agent) {
+        let state = if let Some(record) = file_record.filter(|record| record.agent == agent) {
+            record.state
+        } else if file_state.is_none() && !fields[11].is_empty() && configured_agent == Some(agent)
+        {
             AgentState::from_str(fields[11]).unwrap_or(AgentState::Untracked)
         } else if agent == AgentKind::Codex {
             pane_pid
@@ -283,10 +331,18 @@ pub fn parse_tmux_rows_with_processes(
             command: fields[9].to_owned(),
             agent,
             state,
-            state_since_ms: fields[12].parse().unwrap_or(collected_at_ms),
-            native_session_id: nonempty(fields[13]),
-            turn_id: nonempty(fields[14]),
-            reason: nonempty(fields[15]),
+            state_since_ms: file_record
+                .map(|record| record.state_since_ms)
+                .unwrap_or_else(|| fields[12].parse().unwrap_or(collected_at_ms)),
+            native_session_id: file_record
+                .map(|record| record.session_id.clone())
+                .or_else(|| file_state.is_none().then(|| nonempty(fields[13])).flatten()),
+            turn_id: file_record
+                .and_then(|record| record.active_turn.clone())
+                .or_else(|| file_state.is_none().then(|| nonempty(fields[14])).flatten()),
+            reason: file_record
+                .and_then(|record| record.reason.clone())
+                .or_else(|| file_state.is_none().then(|| nonempty(fields[15])).flatten()),
         };
 
         let session_index = match snapshot

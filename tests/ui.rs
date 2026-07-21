@@ -152,19 +152,19 @@ fn remote_shortcut_hints_explain_how_to_return() {
     let mut dashboard = dashboard_with(&[AgentState::Working]);
     assert_eq!(
         dashboard.shortcut_hint(),
-        "j/k move · h/l host · Tab fold · / filter · Enter attach · Prefix+d return"
+        "j/k move · h/l host · Tab fold · / filter · Enter attach · R refresh · Prefix+d return"
     );
 
     dashboard.move_selection(-1);
     assert_eq!(
         dashboard.shortcut_hint(),
-        "j/k move · h/l host · Tab fold · Enter attach · r rename · Prefix+d return"
+        "j/k move · h/l host · Tab fold · Enter attach · r rename · R refresh · Prefix+d return"
     );
 
     dashboard.move_selection(-1);
     assert_eq!(
         dashboard.shortcut_hint(),
-        "j/k move · h/l host · Tab fold · / filter · Enter connect · Prefix+d return"
+        "j/k move · h/l host · Tab fold · / filter · Enter connect · R refresh · Prefix+d return"
     );
 }
 
@@ -180,12 +180,12 @@ fn local_shortcut_hints_keep_jump_wording() {
 
     assert_eq!(
         dashboard.shortcut_hint(),
-        "j/k move · h/l host · Tab fold · / filter · Enter jump · q close"
+        "j/k move · h/l host · Tab fold · / filter · Enter jump · R refresh · q close"
     );
     dashboard.move_selection(-1);
     assert_eq!(
         dashboard.shortcut_hint(),
-        "j/k move · h/l host · Tab fold · Enter jump · r rename · q close"
+        "j/k move · h/l host · Tab fold · Enter jump · r rename · R refresh · q close"
     );
 }
 

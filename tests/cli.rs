@@ -12,7 +12,8 @@ fn help_exposes_operator_commands() {
         .success()
         .stdout(predicate::str::contains("snapshot"))
         .stdout(predicate::str::contains("setup"))
-        .stdout(predicate::str::contains("doctor"));
+        .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("logs"));
 }
 
 #[test]
@@ -27,72 +28,73 @@ fn hook_outside_tmux_is_a_successful_noop() {
 }
 
 #[test]
-fn hook_updates_only_seer_pane_options() {
+fn hook_never_invokes_tmux_and_writes_runtime_state() {
     let fake = FakeTmux::new();
+    let runtime = tempfile::tempdir().unwrap();
     Command::cargo_bin("tmux-seer")
         .unwrap()
         .args(["hook", "claude", "SessionStart"])
         .env("TMUX_PANE", "%9")
+        .env("TMUX", "/tmp/tmux-test/default,123,0")
+        .env("TMUX_SEER_RUNTIME_DIR", runtime.path())
         .env("TMUX_SEER_TMUX", &fake.program)
         .env("TMUX_SEER_TEST_LOG", &fake.log)
-        .env("TMUX_SEER_TEST_RECORD", &fake.record)
         .write_stdin(r#"{"session_id":"s1"}"#)
         .assert()
         .success();
 
-    let log = fs::read_to_string(&fake.log).unwrap();
-    assert!(log.contains("set-option -p -t %9 @seer_agent_kind claude"));
-    assert!(log.contains("set-option -p -t %9 @seer_state idle"));
-    assert!(log.contains("@seer_record"));
+    assert_eq!(fs::read_to_string(&fake.log).unwrap_or_default(), "");
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(find_pane_state(runtime.path())).unwrap()).unwrap();
+    assert_eq!(state["record"]["agent"], "claude");
+    assert_eq!(state["record"]["state"], "idle");
+    assert_eq!(state["record"]["session_id"], "s1");
 }
 
 #[test]
-fn repeated_hook_activity_does_not_rewrite_or_refresh_tmux() {
+fn repeated_hook_activity_never_enters_tmux_command_queue() {
     let fake = FakeTmux::new();
+    let runtime = tempfile::tempdir().unwrap();
     let run_hook = || {
         Command::cargo_bin("tmux-seer")
             .unwrap()
             .args(["hook", "codex", "PreToolUse"])
             .env("TMUX_PANE", "%9")
+            .env("TMUX", "/tmp/tmux-test/default,123,0")
+            .env("TMUX_SEER_RUNTIME_DIR", runtime.path())
             .env("TMUX_SEER_TMUX", &fake.program)
             .env("TMUX_SEER_TEST_LOG", &fake.log)
-            .env("TMUX_SEER_TEST_RECORD", &fake.record)
-            .env("TMUX_SEER_TEST_TRACKER", &fake.tracker)
             .write_stdin(r#"{"session_id":"s1","turn_id":"t1"}"#)
             .assert()
             .success();
     };
 
     run_hook();
-    let writes_after_first = fs::read_to_string(&fake.log)
-        .unwrap()
-        .lines()
-        .filter(|line| line.starts_with("set-option"))
-        .count();
     run_hook();
 
-    let log = fs::read_to_string(&fake.log).unwrap();
+    assert_eq!(fs::read_to_string(&fake.log).unwrap_or_default(), "");
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(find_pane_state(runtime.path())).unwrap()).unwrap();
+    assert_eq!(state["record"]["state"], "working");
     assert_eq!(
-        log.lines()
-            .filter(|line| line.starts_with("set-option"))
-            .count(),
-        writes_after_first
+        state["codex_tracker"]["active"].as_array().unwrap().len(),
+        1
     );
-    assert!(!log.contains("refresh-client"));
 }
 
 #[test]
 fn codex_child_stop_does_not_idle_the_parent_pane() {
     let fake = FakeTmux::new();
+    let runtime = tempfile::tempdir().unwrap();
     let run_hook = |event: &str, payload: &str| {
         Command::cargo_bin("tmux-seer")
             .unwrap()
             .args(["hook", "codex", event])
             .env("TMUX_PANE", "%9")
+            .env("TMUX", "/tmp/tmux-test/default,123,0")
+            .env("TMUX_SEER_RUNTIME_DIR", runtime.path())
             .env("TMUX_SEER_TMUX", &fake.program)
             .env("TMUX_SEER_TEST_LOG", &fake.log)
-            .env("TMUX_SEER_TEST_RECORD", &fake.record)
-            .env("TMUX_SEER_TEST_TRACKER", &fake.tracker)
             .write_stdin(payload)
             .assert()
             .success();
@@ -105,10 +107,11 @@ fn codex_child_stop_does_not_idle_the_parent_pane() {
     run_hook("PreToolUse", r#"{"session_id":"child","turn_id":"c1"}"#);
     run_hook("Stop", r#"{"session_id":"child","turn_id":"c1"}"#);
 
-    let record: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&fake.record).unwrap()).unwrap();
-    assert_eq!(record["state"], "working");
-    assert_eq!(record["session_id"], "parent");
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(find_pane_state(runtime.path())).unwrap()).unwrap();
+    assert_eq!(state["record"]["state"], "working");
+    assert_eq!(state["record"]["session_id"], "parent");
+    assert_eq!(fs::read_to_string(&fake.log).unwrap_or_default(), "");
 }
 
 #[test]
@@ -165,8 +168,19 @@ struct FakeTmux {
     _directory: TempDir,
     program: std::path::PathBuf,
     log: std::path::PathBuf,
-    record: std::path::PathBuf,
-    tracker: std::path::PathBuf,
+}
+
+fn find_pane_state(runtime: &std::path::Path) -> std::path::PathBuf {
+    let servers = fs::read_dir(runtime.join("servers")).unwrap();
+    for server in servers {
+        let panes = server.unwrap().path().join("panes");
+        if let Ok(entries) = fs::read_dir(panes) {
+            if let Some(entry) = entries.flatten().next() {
+                return entry.path();
+            }
+        }
+    }
+    panic!("no pane state written under {}", runtime.display());
 }
 
 impl FakeTmux {
@@ -174,8 +188,6 @@ impl FakeTmux {
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("tmux");
         let log = directory.path().join("tmux.log");
-        let record = directory.path().join("record.json");
-        let tracker = directory.path().join("tracker.json");
         fs::write(
             &program,
             r#"#!/bin/sh
@@ -218,8 +230,6 @@ esac
             _directory: directory,
             program,
             log,
-            record,
-            tracker,
         }
     }
 }

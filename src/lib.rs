@@ -1,10 +1,14 @@
 pub mod adapters;
 pub mod bootstrap;
 pub mod daemon;
+pub mod diagnostics;
+pub mod hook_state;
 pub mod model;
 pub mod navigation;
 pub mod popup;
 pub mod reducer;
+pub mod runtime;
+pub mod scheduler;
 pub mod setup;
 pub mod snapshot;
 pub mod tmux;

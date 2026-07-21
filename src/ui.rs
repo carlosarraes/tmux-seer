@@ -22,7 +22,7 @@ use ratatui::{
 
 use crate::{
     daemon::runtime_snapshot_path, model::AgentState, navigation::NavigationTarget,
-    popup::PopupLease, snapshot::AggregateSnapshot, tmux::Tmux,
+    popup::PopupLease, runtime, snapshot::AggregateSnapshot, tmux::Tmux,
 };
 
 const STATE_PRIORITY: [AgentState; 4] = [
@@ -114,32 +114,36 @@ impl Dashboard {
 
     pub fn shortcut_hint(&self) -> &'static str {
         let Some(row) = self.selected() else {
-            return "q close";
+            return "R refresh · q close";
         };
         if row.offline {
-            return "j/k move · h/l host · Tab fold · / filter · offline · q close";
+            return "j/k move · h/l host · Tab fold · / filter · offline · R refresh · q close";
         }
         if is_remote_target(row.target.as_ref()) {
             return match row.kind {
                 RowKind::Host => {
-                    "j/k move · h/l host · Tab fold · / filter · Enter connect · Prefix+d return"
+                    "j/k move · h/l host · Tab fold · / filter · Enter connect · R refresh · Prefix+d return"
                 }
                 RowKind::Session => {
-                    "j/k move · h/l host · Tab fold · Enter attach · r rename · Prefix+d return"
+                    "j/k move · h/l host · Tab fold · Enter attach · r rename · R refresh · Prefix+d return"
                 }
                 RowKind::Window | RowKind::Agent => {
-                    "j/k move · h/l host · Tab fold · / filter · Enter attach · Prefix+d return"
+                    "j/k move · h/l host · Tab fold · / filter · Enter attach · R refresh · Prefix+d return"
                 }
             };
         }
         match row.kind {
             RowKind::Host if row.target.is_some() => {
-                "j/k move · h/l host · Tab fold · / filter · Enter connect · q close"
+                "j/k move · h/l host · Tab fold · / filter · Enter connect · R refresh · q close"
             }
-            RowKind::Host => "j/k move · h/l host · Tab fold · / filter · Enter fold · q close",
-            RowKind::Session => "j/k move · h/l host · Tab fold · Enter jump · r rename · q close",
+            RowKind::Host => {
+                "j/k move · h/l host · Tab fold · / filter · Enter fold · R refresh · q close"
+            }
+            RowKind::Session => {
+                "j/k move · h/l host · Tab fold · Enter jump · r rename · R refresh · q close"
+            }
             RowKind::Window | RowKind::Agent => {
-                "j/k move · h/l host · Tab fold · / filter · Enter jump · q close"
+                "j/k move · h/l host · Tab fold · / filter · Enter jump · R refresh · q close"
             }
         }
     }
@@ -417,10 +421,11 @@ fn is_remote_target(target: Option<&NavigationTarget>) -> bool {
 }
 
 pub fn run(client: Option<String>) -> Result<Option<NavigationTarget>> {
+    let _ = runtime::request_refresh();
     let snapshot = load_snapshot()?;
     let mut dashboard = Dashboard::new(snapshot);
     let tmux = Tmux::new();
-    let _popup_lease = client.map(|client| PopupLease::new(tmux.clone(), &client));
+    let _popup_lease = client.as_deref().map(PopupLease::new).transpose()?;
     let mut terminal = open_terminal()?;
     let result = dashboard_loop(&mut terminal, &mut dashboard, &tmux);
     let cleanup = close_terminal(&mut terminal);
@@ -456,7 +461,7 @@ fn dashboard_loop(
             while event::poll(Duration::ZERO)? {
                 events.push(event::read()?);
             }
-            if let DashboardAction::Exit(selected) = handle_events(
+            match handle_events(
                 events,
                 dashboard,
                 &mut filter_mode,
@@ -464,7 +469,16 @@ fn dashboard_loop(
                 &mut status_message,
                 tmux,
             ) {
-                break selected;
+                DashboardAction::Exit(selected) => break selected,
+                DashboardAction::Refresh => {
+                    let _ = runtime::request_refresh();
+                    status_message = Some("Refresh requested".to_owned());
+                    if let Ok(snapshot) = load_snapshot() {
+                        dashboard.replace_snapshot(snapshot);
+                    }
+                    last_reload = Instant::now();
+                }
+                DashboardAction::Continue => {}
             }
         }
         if last_reload.elapsed() >= Duration::from_millis(500) {
@@ -480,6 +494,7 @@ fn dashboard_loop(
 #[derive(Debug, PartialEq, Eq)]
 enum DashboardAction {
     Continue,
+    Refresh,
     Exit(Option<NavigationTarget>),
 }
 
@@ -569,6 +584,7 @@ fn handle_key(
     }
     match key {
         KeyCode::Char('q') | KeyCode::Esc => DashboardAction::Exit(None),
+        KeyCode::Char('R') => DashboardAction::Refresh,
         KeyCode::Up | KeyCode::Char('k') => {
             dashboard.move_selection(-1);
             DashboardAction::Continue
@@ -872,5 +888,33 @@ mod tests {
         assert_eq!(editor.host, "mac");
         assert_eq!(editor.session_id, "$2");
         assert_eq!(editor.name, "review");
+    }
+
+    #[test]
+    fn uppercase_r_requests_an_immediate_refresh() {
+        let mut host = crate::snapshot::HostSnapshot::empty("local", 1);
+        host.push_test_agent(AgentState::Idle);
+        let mut dashboard = Dashboard::new(AggregateSnapshot {
+            schema_version: crate::snapshot::SCHEMA_VERSION,
+            generated_at_ms: 1,
+            hosts: vec![host],
+        });
+        let mut filter_mode = false;
+        let mut rename_editor = None;
+        let mut status_message = None;
+
+        let action = handle_events(
+            [Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('R'),
+                crossterm::event::KeyModifiers::NONE,
+            ))],
+            &mut dashboard,
+            &mut filter_mode,
+            &mut rename_editor,
+            &mut status_message,
+            &Tmux::new(),
+        );
+
+        assert_eq!(action, DashboardAction::Refresh);
     }
 }

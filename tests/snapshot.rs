@@ -1,7 +1,14 @@
-use tmux_seer::model::{AgentKind, AgentState};
+use std::collections::HashMap;
+
 use tmux_seer::snapshot::{
-    aggregate_online, parse_tmux_rows, parse_tmux_rows_with_processes, status_widget,
+    aggregate_online, parse_tmux_rows, parse_tmux_rows_with_cached_processes_and_states,
+    parse_tmux_rows_with_processes, parse_tmux_rows_with_processes_and_states, status_widget,
     status_widget_with, ProcessTable, StatusColors, SCHEMA_VERSION,
+};
+use tmux_seer::{
+    hook_state::PaneState,
+    model::{AgentKind, AgentState},
+    reducer::AgentRecord,
 };
 
 const SEP: char = '\u{1f}';
@@ -336,4 +343,134 @@ fn stale_hook_options_are_ignored_after_agent_process_exits() {
     let snapshot = parse_tmux_rows_with_processes("local", 100, &input, &processes).unwrap();
 
     assert!(snapshot.sessions.is_empty());
+}
+
+#[test]
+fn file_backed_state_overrides_legacy_pane_options() {
+    let input = row(&[
+        "$1",
+        "main",
+        "@2",
+        "1",
+        "app",
+        "%4",
+        "1",
+        "/tmp/shop",
+        "101",
+        "claude",
+        "claude",
+        "idle",
+        "50",
+        "legacy",
+        "",
+        "",
+    ]);
+    let processes = ProcessTable::parse("101 1 claude");
+    let states = HashMap::from([(
+        "%4".to_owned(),
+        PaneState {
+            schema_version: 1,
+            updated_at_ms: 90,
+            record: Some(
+                AgentRecord::new(AgentKind::Claude, "native", 80)
+                    .with_state(AgentState::Working, 80),
+            ),
+            codex_tracker: None,
+        },
+    )]);
+
+    let snapshot =
+        parse_tmux_rows_with_processes_and_states("local", 100, &input, &processes, &states)
+            .unwrap();
+    let pane = &snapshot.sessions[0].windows[0].panes[0];
+    assert_eq!(pane.state, AgentState::Working);
+    assert_eq!(pane.native_session_id.as_deref(), Some("native"));
+    assert_eq!(pane.state_since_ms, 80);
+}
+
+#[test]
+fn cached_process_scan_trusts_a_new_file_backed_agent() {
+    let input = row(&[
+        "$1",
+        "main",
+        "@2",
+        "1",
+        "app",
+        "%4",
+        "1",
+        "/tmp/shop",
+        "101",
+        "bash",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ]);
+    let processes = ProcessTable::parse("999 1 bash");
+    let states = HashMap::from([(
+        "%4".to_owned(),
+        PaneState {
+            schema_version: 1,
+            updated_at_ms: 90,
+            record: Some(
+                AgentRecord::new(AgentKind::Claude, "native", 80)
+                    .with_state(AgentState::Working, 80),
+            ),
+            codex_tracker: None,
+        },
+    )]);
+
+    let snapshot =
+        parse_tmux_rows_with_cached_processes_and_states("local", 100, &input, &processes, &states)
+            .unwrap();
+
+    assert_eq!(
+        snapshot.sessions[0].windows[0].panes[0].agent,
+        AgentKind::Claude
+    );
+    assert_eq!(
+        snapshot.sessions[0].windows[0].panes[0].state,
+        AgentState::Working
+    );
+}
+
+#[test]
+fn file_backed_tombstone_prevents_legacy_state_reuse() {
+    let input = row(&[
+        "$1",
+        "main",
+        "@2",
+        "1",
+        "app",
+        "%4",
+        "1",
+        "/tmp/shop",
+        "101",
+        "claude",
+        "claude",
+        "working",
+        "50",
+        "legacy",
+        "",
+        "",
+    ]);
+    let processes = ProcessTable::parse("101 1 claude");
+    let states = HashMap::from([(
+        "%4".to_owned(),
+        PaneState {
+            schema_version: 1,
+            updated_at_ms: 90,
+            record: None,
+            codex_tracker: None,
+        },
+    )]);
+
+    let snapshot =
+        parse_tmux_rows_with_processes_and_states("local", 100, &input, &processes, &states)
+            .unwrap();
+    let pane = &snapshot.sessions[0].windows[0].panes[0];
+    assert_eq!(pane.state, AgentState::Untracked);
+    assert_eq!(pane.native_session_id, None);
 }

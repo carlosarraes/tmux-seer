@@ -1,4 +1,6 @@
-use anyhow::Result;
+use std::{path::Path, process::Command};
+
+use anyhow::{Context, Result};
 
 use crate::{model::AgentState, snapshot::status_widget, tmux::Tmux};
 
@@ -20,6 +22,8 @@ pub fn bootstrap(tmux: Tmux, binary: &str) -> Result<()> {
     ensure_option(&tmux, "@seer_popup_width", "76")?;
     ensure_option(&tmux, "@seer_popup_height", "70%")?;
     ensure_option(&tmux, "@seer_remote_interval_ms", "2000")?;
+    ensure_option(&tmux, "@seer_remote_max_backoff_ms", "60000")?;
+    ensure_option(&tmux, "@seer_log_level", "warn")?;
     ensure_option(&tmux, "@seer_notify_ms", "4000")?;
     ensure_option(&tmux, "@seer_color_working", "#9ece6a")?;
     ensure_option(&tmux, "@seer_color_idle", "#e0af68")?;
@@ -69,10 +73,52 @@ pub fn bootstrap(tmux: Tmux, binary: &str) -> Result<()> {
     tmux.output([
         "run-shell",
         "-b",
-        &format!("{} daemon", shell_quote(binary)),
+        &format!("sleep 0.25; exec {} daemon", shell_quote(binary)),
     ])?;
     tmux.refresh_status();
     Ok(())
+}
+
+pub fn restart_existing_daemons() -> Result<()> {
+    let Some(server_pid) = std::env::var("TMUX")
+        .ok()
+        .and_then(|value| value.split(',').nth(1)?.parse::<u32>().ok())
+    else {
+        return Ok(());
+    };
+    let ps = std::env::var_os("TMUX_SEER_PS").unwrap_or_else(|| "ps".into());
+    let output = Command::new(ps)
+        .args(["-Ao", "pid=,ppid=,command="])
+        .output()
+        .context("failed to inspect existing Seer daemons")?;
+    if !output.status.success() {
+        return Ok(());
+    }
+    let kill = std::env::var_os("TMUX_SEER_KILL").unwrap_or_else(|| "kill".into());
+    for pid in daemon_pids_for_server(&String::from_utf8_lossy(&output.stdout), server_pid) {
+        let _ = Command::new(&kill).arg(pid.to_string()).status();
+    }
+    Ok(())
+}
+
+pub fn daemon_pids_for_server(processes: &str, server_pid: u32) -> Vec<u32> {
+    processes
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let parent = fields.next()?.parse::<u32>().ok()?;
+            let executable = fields.next()?;
+            let command = fields.next()?;
+            let no_more_arguments = fields.next().is_none();
+            let is_seer = Path::new(executable)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some("tmux-seer");
+            (parent == server_pid && is_seer && command == "daemon" && no_more_arguments)
+                .then_some(pid)
+        })
+        .collect()
 }
 
 fn ensure_option(tmux: &Tmux, name: &str, default: &str) -> Result<()> {
