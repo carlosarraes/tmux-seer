@@ -13,3 +13,4 @@ pub mod setup;
 pub mod snapshot;
 pub mod tmux;
 pub mod ui;
+pub mod watcher;
