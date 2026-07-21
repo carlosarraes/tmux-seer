@@ -26,7 +26,7 @@ fn status_widget_append_is_idempotent_and_preserves_theme() {
 }
 
 #[test]
-fn bootstrap_sets_binding_and_status_without_touching_interval() {
+fn bootstrap_sets_bindings_topology_hooks_and_event_driven_defaults() {
     let fake = FakeTmux::new();
     temp_env::with_vars(
         [
@@ -39,6 +39,7 @@ fn bootstrap_sets_binding_and_status_without_touching_interval() {
     let log = fs::read_to_string(fake.log).unwrap();
     assert!(log.contains("set-option -g status-right #[fg=red]theme #{@seer_widget}"));
     assert!(log.contains("set-option -g @seer_fullscreen_key s"));
+    assert!(log.contains("set-option -g @seer_reconcile_interval_ms 60000"));
     assert!(log.contains("set-option -g @seer_remote_max_backoff_ms 60000"));
     assert!(log.contains("set-option -g @seer_log_level warn"));
     assert!(log.contains("bind-key S run-shell -C display-popup"));
@@ -48,6 +49,24 @@ fn bootstrap_sets_binding_and_status_without_touching_interval() {
     assert!(log.contains("bind-key s run-shell -C display-popup -B -EE"));
     assert!(log.contains("-w \"100%\" -h \"100%\""));
     assert!(log.contains("run-shell -b"));
+    for event in [
+        "after-new-session",
+        "after-new-window",
+        "after-split-window",
+        "after-kill-pane",
+        "after-rename-session",
+        "after-rename-window",
+        "session-closed",
+        "window-linked",
+        "window-unlinked",
+    ] {
+        assert!(
+            log.contains(&format!("set-hook -g {event}[987]")),
+            "missing {event} hook"
+        );
+    }
+    assert!(log.contains("'/tmp/tmux-seer' wake topology"));
+    assert!(!log.contains("@seer_remote_interval_ms"));
     assert!(!log.contains("status-interval"));
 }
 

@@ -4,6 +4,18 @@ use anyhow::{Context, Result};
 
 use crate::{model::AgentState, snapshot::status_widget, tmux::Tmux};
 
+const TOPOLOGY_HOOKS: &[&str] = &[
+    "after-new-session",
+    "after-new-window",
+    "after-split-window",
+    "after-kill-pane",
+    "after-rename-session",
+    "after-rename-window",
+    "session-closed",
+    "window-linked",
+    "window-unlinked",
+];
+
 pub fn with_status_widget(status_right: &str) -> String {
     if status_right.contains("#{@seer_widget}") {
         return status_right.to_owned();
@@ -21,7 +33,7 @@ pub fn bootstrap(tmux: Tmux, binary: &str) -> Result<()> {
     ensure_option(&tmux, "@seer_hosts", "")?;
     ensure_option(&tmux, "@seer_popup_width", "76")?;
     ensure_option(&tmux, "@seer_popup_height", "70%")?;
-    ensure_option(&tmux, "@seer_remote_interval_ms", "2000")?;
+    ensure_option(&tmux, "@seer_reconcile_interval_ms", "60000")?;
     ensure_option(&tmux, "@seer_remote_max_backoff_ms", "60000")?;
     ensure_option(&tmux, "@seer_log_level", "warn")?;
     ensure_option(&tmux, "@seer_notify_ms", "4000")?;
@@ -70,6 +82,11 @@ pub fn bootstrap(tmux: Tmux, binary: &str) -> Result<()> {
         "-C",
         &fullscreen_command,
     ])?;
+    let wake_shell = format!("{} wake topology", shell_quote(binary));
+    let wake_command = format!("run-shell -b {}", tmux_quote(&wake_shell));
+    for event in TOPOLOGY_HOOKS {
+        tmux.output(["set-hook", "-g", &format!("{event}[987]"), &wake_command])?;
+    }
     tmux.output([
         "run-shell",
         "-b",

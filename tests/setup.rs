@@ -3,7 +3,7 @@ use tempfile::tempdir;
 use tmux_seer::setup::{
     apply_json_integration, apply_pi_extension, confirm_apply, merge_hook_json,
     pi_extension_source, preview_integration_change, preview_target, remote_preview_script,
-    remote_setup_script, snapshot_freshness, Integration, SetupItem, SetupModel,
+    remote_setup_script, snapshot_age_description, Integration, SetupItem, SetupModel,
 };
 
 #[test]
@@ -242,7 +242,13 @@ fn review_target_names_exact_host_and_file() {
 }
 
 #[test]
-fn doctor_classifies_runtime_snapshot_freshness() {
-    assert_eq!(snapshot_freshness(10_000, 9_000).0, "ok");
-    assert_eq!(snapshot_freshness(20_000, 1_000).0, "warn");
+fn unchanged_event_driven_snapshot_is_not_reported_as_unhealthy() {
+    assert_eq!(
+        snapshot_age_description(10_000, 9_000),
+        "last change 1000ms ago"
+    );
+    assert_eq!(
+        snapshot_age_description(20_000, 1_000),
+        "last change 19s ago"
+    );
 }

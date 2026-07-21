@@ -35,7 +35,7 @@ tmux-seer doctor
 
 Setup previews an exact diff and changes nothing until you approve it. Restart active agents afterward; Codex also requires trusting the new definitions through `/hooks`.
 
-When upgrading from `0.0.x`, `prefix + I` replaces the legacy daemon automatically. Run `tmux-seer setup` and select configured remote integrations once so those hosts receive the matching `0.1.x` binary. Existing hook commands do not need to be reinstalled.
+When upgrading, `prefix + I` replaces the running daemon. Run `tmux-seer setup` once to send the matching binary to configured remote hosts; existing agent hooks do not need to be reinstalled.
 
 ## Use
 
@@ -78,7 +78,7 @@ Run `tmux-seer setup` again after adding a host. The picker installs the matchin
 | `@seer_hosts` | empty | Space-separated SSH aliases |
 | `@seer_popup_width` | `76` | Popup columns |
 | `@seer_popup_height` | `70%` | Popup height |
-| `@seer_remote_interval_ms` | `2000` | Remote refresh interval |
+| `@seer_reconcile_interval_ms` | `60000` | Safety reconciliation interval |
 | `@seer_remote_max_backoff_ms` | `60000` | Maximum retry delay for an offline host |
 | `@seer_notify_ms` | `4000` | Notification duration |
 | `@seer_log_level` | `warn` | `warn`, `error`, or opt-in `debug` diagnostics |
@@ -86,9 +86,7 @@ Run `tmux-seer setup` again after adding a host. The picker installs the matchin
 
 Status colors use `@seer_color_working`, `@seer_color_idle`, `@seer_color_input`, and `@seer_color_offline`.
 
-Hooks and popup leases use private runtime files rather than tmux options, so agent activity cannot block tmux or trigger status-theme redraws. Seer automatically removes stale pane records; `R` forces that reconciliation and retries every remote host immediately.
-
-Pane topology and process discovery may lag by up to five seconds. Hook-driven state changes remain fast; use `R` when you need an immediate full rescan. Offline hosts back off to the configured retry limit instead of slowing healthy hosts.
+Agent state, tmux topology, remote snapshots, and popup updates are event-driven. A 60-second safety reconciliation removes stale records after crashes; `R` runs it immediately and reconnects remote hosts. Offline hosts back off independently without slowing healthy hosts.
 
 For diagnostics:
 
@@ -143,7 +141,7 @@ This removes only Seer-owned agent integrations. Remove the plugin entry separat
 just check
 ```
 
-Maintainers can publish from a clean tree with `just release 0.1.0`.
+Maintainers can publish from a clean tree with `just release 0.2.0`.
 
 </details>
 

@@ -468,8 +468,8 @@ pub fn doctor() -> Result<String> {
         .and_then(|bytes| serde_json::from_slice::<AggregateSnapshot>(&bytes).ok())
     {
         Some(snapshot) => {
-            let (level, description) = snapshot_freshness(now_ms(), snapshot.generated_at_ms);
-            lines.push(format!("[{level}] runtime snapshot: {description}"));
+            let description = snapshot_age_description(now_ms(), snapshot.generated_at_ms);
+            lines.push(format!("[ok] runtime snapshot: readable; {description}"));
         }
         None => lines.push("[warn] runtime snapshot: missing; daemon may not be running".into()),
     }
@@ -508,12 +508,12 @@ pub fn doctor() -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-pub fn snapshot_freshness(now: u64, generated_at: u64) -> (&'static str, String) {
+pub fn snapshot_age_description(now: u64, generated_at: u64) -> String {
     let age_ms = now.saturating_sub(generated_at);
-    if age_ms <= 6_000 {
-        ("ok", format!("fresh ({}ms old)", age_ms))
+    if age_ms < 10_000 {
+        format!("last change {age_ms}ms ago")
     } else {
-        ("warn", format!("stale ({}s old)", age_ms / 1_000))
+        format!("last change {}s ago", age_ms / 1_000)
     }
 }
 
