@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod bootstrap;
+pub mod collector;
 pub mod daemon;
 pub mod diagnostics;
 pub mod hook_state;

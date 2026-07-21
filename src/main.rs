@@ -69,6 +69,16 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
+    #[command(hide = true)]
+    Wake {
+        #[arg(default_value = "manual")]
+        reason: String,
+    },
+    #[command(hide = true)]
+    Stream {
+        #[arg(long)]
+        host: String,
+    },
 }
 
 #[tokio::main]
@@ -149,6 +159,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Logs { follow } => tmux_seer::diagnostics::print_logs(follow),
+        Command::Wake { reason: _ } => tmux_seer::runtime::request_refresh(),
+        Command::Stream { host } => tmux_seer::collector::run_stream(host).await,
         Command::Bootstrap => {
             let binary = std::env::current_exe()?;
             tmux_seer::bootstrap::restart_existing_daemons()?;

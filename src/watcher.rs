@@ -1,4 +1,8 @@
-use std::{path::Path, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -27,23 +31,28 @@ impl FileSignal {
         })
     }
 
-    pub async fn changed(&mut self) -> Result<()> {
-        loop {
+    pub async fn changed(&mut self) -> Result<Vec<PathBuf>> {
+        let mut paths = loop {
             let event = self
                 .events
                 .recv()
                 .await
                 .context("filesystem watcher stopped")??;
             if is_change(&event) {
-                break;
+                break event.paths;
             }
-        }
+        };
 
         time::sleep(COALESCE_WINDOW).await;
         while let Ok(event) = self.events.try_recv() {
-            event.context("filesystem watcher failed")?;
+            let event = event.context("filesystem watcher failed")?;
+            if is_change(&event) {
+                paths.extend(event.paths);
+            }
         }
-        Ok(())
+        let mut unique = HashSet::new();
+        paths.retain(|path| unique.insert(path.clone()));
+        Ok(paths)
     }
 }
 
